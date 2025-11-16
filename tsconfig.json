@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "types": ["vite/client", "chrome"],
+    "baseUrl": ".",
+    "paths": {
+      "@synccaster/core": ["./packages/core/src"],
+      "@synccaster/adapters": ["./packages/adapters/src"],
+      "@synccaster/editor": ["./packages/editor/src"],
+      "@synccaster/utils": ["./packages/utils/src"]
+    }
+  },
+  "include": ["apps/**/*", "packages/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

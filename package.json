@@ -1,0 +1,26 @@
+{
+  "name": "synccaster",
+  "version": "2.0.0",
+  "private": true,
+  "description": "多平台内容同步助手",
+  "scripts": {
+    "dev": "pnpm --filter @synccaster/extension dev",
+    "build": "pnpm --filter @synccaster/extension build",
+    "build:all": "pnpm -r build",
+    "test": "vitest",
+    "lint": "eslint . --ext .ts,.tsx,.vue",
+    "format": "prettier --write \"**/*.{ts,tsx,vue,json,md}\""
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.5",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "@vitejs/plugin-vue": "^5.0.0",
+    "eslint": "^8.56.0",
+    "eslint-plugin-vue": "^9.19.2",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.0.8",
+    "vitest": "^1.1.0"
+  }
+}
