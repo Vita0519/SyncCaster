@@ -2,13 +2,20 @@
  * 平台标识
  */
 export type PlatformId =
-  | 'wechat'
-  | 'zhihu'
-  | 'juejin'
-  | 'csdn'
-  | 'jianshu'
-  | 'medium'
-  | 'toutiao';
+  | 'wechat'      // 微信公众号
+  | 'zhihu'       // 知乎
+  | 'juejin'      // 掘金
+  | 'csdn'        // CSDN
+  | 'jianshu'     // 简书
+  | 'cnblogs'     // 博客园
+  | 'oschina'     // 开源中国
+  | '51cto'       // 51CTO
+  | 'tencent-cloud' // 腾讯云开发者社区
+  | 'aliyun'      // 阿里云开发者社区
+  | 'segmentfault' // 思否
+  | 'bilibili'    // 哔哩哔哩
+  | 'medium'      // Medium（国际）
+  | 'toutiao';    // 头条号
 
 /**
  * 资源引用
@@ -30,6 +37,59 @@ export interface AssetRef {
 }
 
 /**
+ * 内联公式节点
+ */
+export interface InlineMathNode {
+  type: 'inlineMath';
+  latex: string;
+  originalFormat?: string; // 原始格式，如 "$...$" 或 "\\(...\\)"
+}
+
+/**
+ * 块级公式节点
+ */
+export interface BlockMathNode {
+  type: 'blockMath';
+  latex: string;
+  originalFormat?: string; // 原始格式，如 "$$...$$" 或 "\\[...\\]"
+}
+
+/**
+ * 图片节点（语义化）
+ */
+export interface ImageNode {
+  type: 'image';
+  assetId?: string; // 对应 assets 数组中的 id
+  url: string;
+  alt?: string;
+  title?: string;
+}
+
+/**
+ * 代码块节点
+ */
+export interface CodeBlockNode {
+  type: 'codeBlock';
+  language: string;
+  code: string;
+}
+
+/**
+ * 内容块节点（段落/标题等）
+ */
+export interface ContentBlockNode {
+  type: 'paragraph' | 'heading' | 'list' | 'blockquote' | 'table';
+  level?: number; // for heading
+  content: string | (InlineMathNode | ImageNode | string)[]; // 支持混合内容
+  meta?: Record<string, any>;
+}
+
+/**
+ * AST 节点类型联合
+ */
+export type ASTNode = InlineMathNode | BlockMathNode | ImageNode | CodeBlockNode | ContentBlockNode;
+
+/**
  * 统一内容模型（SSOT - Single Source of Truth）
  */
 export interface CanonicalPost {
@@ -48,7 +108,16 @@ export interface CanonicalPost {
   updated_at?: string;
   createdAt?: number;
   updatedAt?: number;
+  
+  // 原始 Markdown（向后兼容）
   body_md: string;
+  
+  // 语义化 AST（可选，逐步迁移）
+  ast?: ASTNode[];
+  
+  // 公式提取（便于平台差异处理）
+  formulas?: (InlineMathNode | BlockMathNode)[];
+  
   assets?: AssetRef[];
   meta?: Record<string, any>;
 }

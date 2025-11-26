@@ -22,7 +22,7 @@
               <div class="flex items-center gap-3">
                 <button
                   @click="toggleTheme"
-                  class="w-10 h-10 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors flex items-center justify-center text-xl"
+                  class="w-10 h-10 rounded-lg bg-gray-100 hover:bg-gray-200 transition-colors flex items-center justify-center text-xl select-none"
                   :title="isDark ? '切换到亮色模式' : '切换到暗色模式'"
                 >
                   {{ isDark ? '🌙' : '☀️' }}
@@ -149,5 +149,34 @@ function toggleTheme() {
 .bg-clip-text {
   -webkit-background-clip: text;
   background-clip: text;
+}
+
+/* 全局禁用文本选择（默认） */
+* {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+/* 允许可编辑元素选择文本 */
+input,
+textarea,
+[contenteditable="true"],
+.allow-select {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
+}
+
+/* 代码块和预格式化文本允许选择 */
+code,
+pre,
+.prose {
+  -webkit-user-select: text;
+  -moz-user-select: text;
+  -ms-user-select: text;
+  user-select: text;
 }
 </style>

@@ -4,8 +4,10 @@
  */
 
 import { db, type Job } from '@synccaster/core';
-import { getAdapter } from '@synccaster/adapters';
+import { publishToTarget } from './publish-engine';
 import { Logger } from '@synccaster/utils';
+import { startZhihuLearn, fetchZhihuLearnedTemplate } from './learn-recorder';
+import { AccountService } from './account-service';
 
 const logger = new Logger('background');
 
@@ -241,6 +243,50 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
         return { success: false, error: error.message };
       }
 
+    case 'ADD_ACCOUNT':
+      // 添加账号
+      logger.info('account', 'Adding account', { platform: message.data?.platform });
+      try {
+        const account = await AccountService.addAccount(message.data.platform);
+        logger.info('account', 'Account added', { account });
+        return { success: true, account };
+      } catch (error: any) {
+        logger.error('account', 'Failed to add account', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'QUICK_ADD_ACCOUNT':
+      // 快速添加账号（用户已登录）
+      logger.info('account', 'Quick adding account', { platform: message.data?.platform });
+      try {
+        const account = await AccountService.quickAddAccount(message.data.platform);
+        logger.info('account', 'Account quick added', { account });
+        return { success: true, account };
+      } catch (error: any) {
+        logger.error('account', 'Failed to quick add account', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'CHECK_ACCOUNT_AUTH':
+      // 检查账号认证状态
+      try {
+        const isValid = await AccountService.checkAccountAuth(message.data.account);
+        return { success: true, isValid };
+      } catch (error: any) {
+        logger.error('account', 'Failed to check account auth', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'REFRESH_ACCOUNT':
+      // 刷新账号信息
+      try {
+        const account = await AccountService.refreshAccount(message.data.account);
+        return { success: true, account };
+      } catch (error: any) {
+        logger.error('account', 'Failed to refresh account', { error });
+        return { success: false, error: error.message };
+      }
+
     case 'CONTENT_COLLECTED':
       // 内容采集完成的通知
       logger.info('collect', 'Content collected successfully', message.data);
@@ -252,13 +298,47 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
         
         chrome.notifications.create({
           type: 'basic',
-          iconUrl: 'assets/icon-48.png',
+          iconUrl: chrome.runtime.getURL('assets/icon-48.png'),
           title: saved.success ? '采集成功并已保存' : '采集成功但保存失败',
           message: `文章：${message.data.data?.title || '未知标题'}`,
         });
       }
       
       return { received: true, saved };
+
+    case 'START_PUBLISH_JOB':
+      // 启动发布任务
+      logger.info('publish', 'Starting publish job', { jobId: message.data?.jobId });
+      try {
+        await startJob(message.data.jobId);
+        return { success: true };
+      } catch (error: any) {
+        logger.error('publish', 'Failed to start publish job', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'START_ZHIHU_LEARN':
+      logger.info('learn', 'Starting Zhihu learn mode');
+      try {
+        const r = await startZhihuLearn();
+        return r;
+      } catch (error: any) {
+        logger.error('learn', 'Failed to start learn mode', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'FETCH_ZHIHU_TEMPLATE':
+      logger.info('learn', 'Fetching Zhihu learned template');
+      try {
+        const r = await fetchZhihuLearnedTemplate();
+        if (r.success) {
+          await db.config.put({ id: 'zhihu_template', key: 'zhihu_template', value: r.records, updatedAt: Date.now() } as any);
+        }
+        return r;
+      } catch (error: any) {
+        logger.error('learn', 'Failed to fetch/template', { error });
+        return { success: false, error: error.message };
+      }
     
     default:
       throw new Error(`Unknown message type: ${message.type}`);
@@ -374,43 +454,97 @@ async function executeJob(jobId: string) {
   logger.info('job', `Executing job: ${jobId}`, { targets: job.targets.length });
   
   try {
+    let successCount = 0;
+    let failCount = 0;
+
     for (let i = 0; i < job.targets.length; i++) {
       const target = job.targets[i];
-      const progress = (i / job.targets.length) * 100;
-      
-      await db.jobs.update(jobId, {
-        progress,
-        updatedAt: Date.now(),
-      });
-      
+      const startAt = Date.now();
+
+      // 更新进度（开始此目标）
+      const progressStart = Math.round((i / job.targets.length) * 100);
+      await db.jobs.update(jobId, { progress: progressStart, updatedAt: Date.now() });
+
       logger.info('job', `Publishing to ${target.platform}`, { jobId, target });
-      
-      // TODO: 实现平台发布逻辑
-      // const adapter = getAdapter(target.platform);
-      // const result = await adapter.publish(...);
-      
-      await new Promise((resolve) => setTimeout(resolve, 1000)); // 模拟延迟
+
+      const result = await publishToTarget(jobId, post as any, target as any);
+
+      if (result.success) {
+        successCount++;
+        // 写入平台映射
+        const existing = await db.platformMaps
+          .where('postId')
+          .equals(job.postId)
+          .and((m) => m.platform === target.platform && m.accountId === target.accountId)
+          .first();
+
+        if (existing) {
+          await db.platformMaps.update(existing.id, {
+            url: result.url,
+            remoteId: result.remoteId,
+            status: 'PUBLISHED',
+            lastSyncAt: Date.now(),
+            meta: { ...(existing.meta || {}), lastDurationMs: Date.now() - startAt },
+          });
+        } else {
+          await db.platformMaps.add({
+            id: crypto.randomUUID(),
+            postId: job.postId,
+            platform: target.platform,
+            accountId: target.accountId,
+            url: result.url,
+            remoteId: result.remoteId,
+            status: 'PUBLISHED',
+            lastSyncAt: Date.now(),
+            meta: { lastDurationMs: Date.now() - startAt },
+          } as any);
+        }
+      } else {
+        failCount++;
+        // 记录失败映射
+        await db.platformMaps.add({
+          id: crypto.randomUUID(),
+          postId: job.postId,
+          platform: target.platform,
+          accountId: target.accountId,
+          status: 'FAILED',
+          lastSyncAt: Date.now(),
+          lastError: result.error || 'Unknown error',
+        } as any);
+      }
+
+      // 更新进度（结束此目标）
+      const progressEnd = Math.round(((i + 1) / job.targets.length) * 100);
+      await db.jobs.update(jobId, { progress: progressEnd, updatedAt: Date.now() });
     }
-    
-    // 任务完成
+
+    const allFailed = failCount === job.targets.length;
+    const finalState = allFailed ? 'FAILED' : 'DONE';
+
     await db.jobs.update(jobId, {
-      state: 'DONE',
+      state: finalState as any,
       progress: 100,
       updatedAt: Date.now(),
+      error: allFailed ? 'All targets failed. Check logs.' : undefined,
     });
-    
-    logger.info('job', `Job completed: ${jobId}`);
-    
+
+    logger.info('job', `Job completed: ${jobId} (success: ${successCount}, failed: ${failCount})`);
+
     // 发送通知
-    chrome.notifications.create({
-      type: 'basic',
-      iconUrl: chrome.runtime.getURL('assets/icon-128.png'),
-      title: 'SyncCaster',
-      message: `文章《${post.title}》发布完成`,
-    });
+    try {
+      await chrome.notifications.create({
+        type: 'basic',
+        iconUrl: chrome.runtime.getURL('icon.png'),
+        title: 'SyncCaster',
+        message: allFailed
+          ? `文章《${post.title}》发布失败（全部失败）`
+          : `文章《${post.title}》发布完成（成功${successCount}，失败${failCount}）`,
+      });
+    } catch (e) {
+      logger.warn('job', '通知发送失败', { error: e });
+    }
   } catch (error: any) {
     logger.error('job', `Job failed: ${jobId}`, { error });
-    
     await db.jobs.update(jobId, {
       state: 'FAILED',
       error: error.message,

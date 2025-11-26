@@ -13,6 +13,7 @@ import {
   cleanDOMWithWhitelist,
   extractAndNormalizeImages,
   checkQuality,
+  normalizeBlockSpacing,
   type CollectedImage,
   type ContentMetrics,
 } from './collector-utils';
@@ -133,6 +134,9 @@ async function collectContent(options = {}) {
     const images = extractAndNormalizeImages(container);
     logInfo('collect', '提取图片', { count: images.length });
 
+    // 2.5 归一化段落空白与连续 <br>
+    normalizeBlockSpacing(container);
+
     // ========== 步骤3: Turndown 转换（含自定义规则） ==========
     body_html = container.innerHTML;
     const td = new TurndownService({
@@ -165,7 +169,14 @@ async function collectContent(options = {}) {
       replacement: (_content: any, node: any) => `\n\n${(node as Element).outerHTML}\n\n`,
     });
 
-    const body_md = td.turndown(body_html || '');
+    // Turndown to Markdown
+    let body_md = td.turndown(body_html || '');
+    // Post-process Markdown to reduce extra blank lines
+    body_md = body_md.replace(/\r\n/g, '\n');              // normalize EOL
+    body_md = body_md.replace(/[ \t]+\n/g, '\n');           // trim trailing spaces
+    body_md = body_md.replace(/\n{3,}/g, '\n\n');          // collapse 3+ blank lines
+    body_md = body_md.replace(/^\s*\n+/, '');               // remove leading blank lines
+    body_md = body_md.replace(/\n+\s*$/, '');               // remove trailing blank lines
     const text_len = (body_md || '').length;
     const summary = (container.textContent || '').trim().slice(0, 200);
 
@@ -192,6 +203,13 @@ async function collectContent(options = {}) {
       quality: qualityCheck.pass ? 'pass' : 'fallback',
     });
 
+    // 转换为语义化公式节点
+    const formulaNodes = formulas.map(f => ({
+      type: f.display ? 'blockMath' : 'inlineMath',
+      latex: f.latex,
+      originalFormat: f.originalFormat,
+    }));
+
     return {
       success: true,
       data: {
@@ -201,7 +219,7 @@ async function collectContent(options = {}) {
         body_md,
         body_html,
         images,
-        formulas,
+        formulas: formulaNodes, // 语义化公式节点
         wordCount: text_len,
         imageCount: images.length,
         formulaCount: formulas.length,

@@ -13,12 +13,12 @@
           <input
             v-model="title"
             type="text"
-            class="w-full border rounded px-3 py-2 pr-10"
+            class="w-full border rounded px-3 py-2 pr-12"
             placeholder="请输入标题"
           />
           <button
             @click="copyText(title)"
-            class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition-colors"
+            class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded bg-white/90 hover:bg-gray-100 border border-gray-200 text-gray-500 hover:text-gray-700 transition-all shadow-sm hover:shadow"
             title="复制标题"
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -34,12 +34,12 @@
         <div class="relative">
           <textarea
             v-model="body"
-            class="w-full h-80 border rounded px-3 py-2 pr-10 font-mono text-sm"
+            class="w-full h-80 border rounded px-3 py-2 pr-12 font-mono text-sm"
             placeholder="# 开始编辑..."
           ></textarea>
           <button
             @click="copyText(body)"
-            class="absolute right-2 top-2 text-gray-400 hover:text-gray-600 transition-colors"
+            class="absolute right-3 top-3 p-1.5 rounded bg-white/90 hover:bg-gray-100 border border-gray-200 text-gray-500 hover:text-gray-700 transition-all shadow-sm hover:shadow"
             title="复制正文"
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -78,27 +78,30 @@
     </div>
 
     <!-- 图片预览模态框 -->
-    <transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0"
-      enter-to-class="opacity-100"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100"
-      leave-to-class="opacity-0"
-    >
-      <div
-        v-if="previewImg"
-        class="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4"
-        @click="closePreview"
+    <Teleport to="body">
+      <transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
       >
-        <div class="max-w-4xl max-h-full">
-          <img :src="previewImg.url" :alt="previewImg.alt || ''" class="max-w-full max-h-[90vh] object-contain rounded" />
-          <div v-if="previewImg.title || previewImg.alt" class="text-white text-center mt-2">
-            {{ previewImg.title || previewImg.alt }}
+        <div
+          v-if="previewImg"
+          class="fixed inset-0 flex items-center justify-center p-4"
+          style="background-color: rgba(0, 0, 0, 0.75); z-index: 9999;"
+          @click="closeImagePreview"
+        >
+          <div class="max-w-4xl max-h-full">
+            <img :src="previewImg.url" :alt="previewImg.alt || ''" class="max-w-full max-h-[85vh] object-contain rounded shadow-2xl" />
+            <div v-if="previewImg.title || previewImg.alt" class="text-white text-center mt-3 font-medium">
+              {{ previewImg.title || previewImg.alt }}
+            </div>
           </div>
         </div>
-      </div>
-    </transition>
+      </transition>
+    </Teleport>
 
     <!-- 复制成功提示 -->
     <transition
@@ -116,12 +119,170 @@
         ✓ 已复制到剪贴板
       </div>
     </transition>
+
+    <!-- 发布对话框 -->
+    <Teleport to="body">
+      <transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="showPublishDialog"
+          class="fixed inset-0 flex items-center justify-center p-4"
+          style="background-color: rgba(0, 0, 0, 0.5); z-index: 9999;"
+          @click.self="closePublishDialog"
+        >
+          <div class="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[85vh] overflow-y-auto" @click.stop>
+          <!-- 对话框头部 -->
+          <div class="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+            <h3 class="text-xl font-bold text-gray-800">发布文章</h3>
+            <button
+              @click="closePublishDialog"
+              class="text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <!-- 对话框内容 -->
+          <div class="p-6 space-y-4">
+            <!-- 文章信息 -->
+            <div class="bg-gray-50 rounded-lg p-4">
+              <div class="text-sm text-gray-600 mb-1">文章标题</div>
+              <div class="font-semibold text-gray-800">{{ title || '未命名' }}</div>
+              <div class="text-sm text-gray-500 mt-2">字数：{{ body.length }}</div>
+            </div>
+
+            <!-- 平台选择 -->
+            <div>
+              <div class="flex items-center justify-between mb-3">
+                <label class="text-sm font-semibold text-gray-700">选择发布平台</label>
+                <button
+                  @click="toggleSelectAll"
+                  class="text-sm text-blue-600 hover:text-blue-700 transition-colors"
+                >
+                  {{ allSelected ? '取消全选' : '全选' }}
+                </button>
+              </div>
+
+              <!-- 已登录账号列表 -->
+              <div v-if="enabledAccounts.length > 0" class="space-y-2">
+                <div
+                  v-for="account in enabledAccounts"
+                  :key="account.id"
+                  class="flex items-center gap-3 p-3 border rounded-lg hover:bg-gray-50 transition-colors cursor-pointer"
+                  :class="selectedAccounts.includes(account.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200'"
+                  @click="toggleAccount(account.id)"
+                >
+                  <input
+                    type="checkbox"
+                    :checked="selectedAccounts.includes(account.id)"
+                    class="w-4 h-4 text-blue-600 rounded"
+                    @click.stop="toggleAccount(account.id)"
+                  />
+                  <img
+                    v-if="account.avatar"
+                    :src="account.avatar"
+                    :alt="account.nickname"
+                    class="w-8 h-8 rounded-full"
+                  />
+                  <div class="flex-1">
+                    <div class="font-medium text-gray-800">{{ account.nickname }}</div>
+                    <div class="text-xs text-gray-500">{{ getPlatformName(account.platform) }}</div>
+                  </div>
+                  <span class="text-xl">{{ getPlatformIcon(account.platform) }}</span>
+                </div>
+              </div>
+
+              <!-- 无可用账号提示 -->
+              <div v-else class="text-center py-8 text-gray-500">
+                <div class="text-4xl mb-2">📭</div>
+                <div>暂无已登录的账号</div>
+                <button
+                  @click="goToAccounts"
+                  class="mt-3 text-blue-600 hover:text-blue-700 text-sm"
+                >
+                  前往添加账号 →
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 对话框底部 -->
+          <div class="sticky bottom-0 bg-white border-t border-gray-200 px-6 py-4 flex gap-3 rounded-b-2xl">
+            <button
+              @click="previewPost"
+              class="flex-1 px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+              :disabled="!title && !body"
+            >
+              👁️ 预览
+            </button>
+            <button
+              @click="confirmPublish"
+              class="flex-1 px-4 py-2 rounded-lg bg-green-600 text-white hover:bg-green-700 transition-colors disabled:bg-gray-300 disabled:cursor-not-allowed"
+              :disabled="selectedAccounts.length === 0 || publishing"
+            >
+              {{ publishing ? '发布中...' : `发布到 ${selectedAccounts.length} 个平台` }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
+    </Teleport>
+
+    <!-- 预览对话框 -->
+    <Teleport to="body">
+      <transition
+        enter-active-class="transition duration-200 ease-out"
+        enter-from-class="opacity-0"
+        enter-to-class="opacity-100"
+        leave-active-class="transition duration-150 ease-in"
+        leave-from-class="opacity-100"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="showPreview"
+          class="fixed inset-0 flex items-center justify-center p-4"
+          style="background-color: rgba(0, 0, 0, 0.5); z-index: 9999;"
+          @click.self="closePreview"
+        >
+          <div class="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[85vh] overflow-y-auto" @click.stop>
+          <!-- 预览头部 -->
+          <div class="sticky top-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between rounded-t-2xl">
+            <h3 class="text-xl font-bold text-gray-800">文章预览</h3>
+            <button
+              @click="closePreview"
+              class="text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          <!-- 预览内容 -->
+          <div class="p-8">
+            <h1 class="text-3xl font-bold text-gray-900 mb-4">{{ title || '未命名标题' }}</h1>
+            <div class="text-sm text-gray-500 mb-6">字数：{{ body.length }} · 图片：{{ images.length }}</div>
+            <div class="prose prose-lg max-w-none" v-html="previewHtml"></div>
+          </div>
+        </div>
+      </div>
+    </transition>
+    </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
-import { db } from '@synccaster/core';
+import { ref, computed, onMounted } from 'vue';
+import { db, type Account } from '@synccaster/core';
+import { marked } from 'marked';
 
 const loading = ref(true);
 const notFound = ref(false);
@@ -131,6 +292,28 @@ const body = ref('');
 const images = ref<any[]>([]);
 const previewImg = ref<any>(null);
 const showCopyTip = ref(false);
+const showPublishDialog = ref(false);
+const showPreview = ref(false);
+const publishing = ref(false);
+const enabledAccounts = ref<Account[]>([]);
+const selectedAccounts = ref<string[]>([]);
+
+// 计算是否全选
+const allSelected = computed(() => {
+  return enabledAccounts.value.length > 0 && 
+         selectedAccounts.value.length === enabledAccounts.value.length;
+});
+
+// 预览 HTML
+const previewHtml = computed(() => {
+  if (!body.value) return '<p class="text-gray-400">暂无内容</p>';
+  try {
+    return marked(body.value);
+  } catch (error) {
+    console.error('Markdown 解析失败:', error);
+    return `<pre class="text-red-500">Markdown 解析失败</pre>`;
+  }
+});
 
 // 复制文本到剪贴板
 async function copyText(text: string) {
@@ -150,8 +333,8 @@ function previewImage(img: any) {
   previewImg.value = img;
 }
 
-// 关闭预览
-function closePreview() {
+// 关闭图片预览
+function closeImagePreview() {
   previewImg.value = null;
 }
 
@@ -224,8 +407,177 @@ function goBack() {
   window.location.hash = 'posts';
 }
 
-function publish() {
-  alert('发布功能尚未实现');
+// 加载已启用的账号
+async function loadEnabledAccounts() {
+  try {
+    const allAccounts = await db.accounts.toArray();
+    enabledAccounts.value = allAccounts.filter(account => account.enabled === true);
+    console.log('已加载账号:', enabledAccounts.value.length, enabledAccounts.value);
+  } catch (error) {
+    console.error('加载账号失败:', error);
+    enabledAccounts.value = [];
+  }
+}
+
+// 获取平台名称
+function getPlatformName(platform: string): string {
+  const names: Record<string, string> = {
+    wechat: '微信公众号',
+    zhihu: '知乎',
+    juejin: '掘金',
+    csdn: 'CSDN',
+    jianshu: '简书',
+    medium: 'Medium',
+    toutiao: '今日头条',
+  };
+  return names[platform] || platform;
+}
+
+// 获取平台图标
+function getPlatformIcon(platform: string): string {
+  const icons: Record<string, string> = {
+    wechat: '💚',
+    zhihu: '🔵',
+    juejin: '🔷',
+    csdn: '📘',
+    jianshu: '📝',
+    medium: '📖',
+    toutiao: '📰',
+  };
+  return icons[platform] || '📄';
+}
+
+// 切换账号选择
+function toggleAccount(accountId: string) {
+  const index = selectedAccounts.value.indexOf(accountId);
+  if (index > -1) {
+    selectedAccounts.value.splice(index, 1);
+  } else {
+    selectedAccounts.value.push(accountId);
+  }
+}
+
+// 全选/取消全选
+function toggleSelectAll() {
+  if (allSelected.value) {
+    selectedAccounts.value = [];
+  } else {
+    selectedAccounts.value = enabledAccounts.value.map(a => a.id);
+  }
+}
+
+// 打开发布对话框
+async function publish() {
+  // 确保文章已保存
+  if (!id.value || id.value === 'new') {
+    alert('请先保存文章');
+    await save();
+    if (!id.value || id.value === 'new') return;
+  }
+  
+  // 加载账号
+  await loadEnabledAccounts();
+  
+  // 重置选择
+  selectedAccounts.value = [];
+  
+  // 显示对话框
+  showPublishDialog.value = true;
+}
+
+// 关闭发布对话框
+function closePublishDialog() {
+  showPublishDialog.value = false;
+  selectedAccounts.value = [];
+}
+
+// 预览文章
+function previewPost() {
+  showPreview.value = true;
+}
+
+// 关闭预览
+function closePreview() {
+  showPreview.value = false;
+}
+
+// 前往账号管理
+function goToAccounts() {
+  window.location.hash = 'accounts';
+}
+
+// 确认发布
+async function confirmPublish() {
+  if (selectedAccounts.value.length === 0) {
+    alert('请选择至少一个发布平台');
+    return;
+  }
+  
+  publishing.value = true;
+  
+  try {
+    // 获取文章数据
+    const post = await db.posts.get(id.value);
+    if (!post) {
+      throw new Error('文章不存在');
+    }
+    
+    // 构建发布目标
+    const targets = selectedAccounts.value.map(accountId => {
+      const account = enabledAccounts.value.find(a => a.id === accountId);
+      return {
+        platform: account!.platform,
+        accountId: accountId,
+        config: {},
+      };
+    });
+    
+    // 创建发布任务
+    const jobId = crypto.randomUUID();
+    const now = Date.now();
+    
+    await db.jobs.add({
+      id: jobId,
+      postId: id.value,
+      targets: targets,
+      state: 'PENDING',
+      progress: 0,
+      attempts: 0,
+      maxAttempts: 3,
+      logs: [
+        {
+          id: crypto.randomUUID(),
+          level: 'info',
+          step: 'create',
+          message: `创建发布任务，目标平台：${targets.length} 个`,
+          timestamp: now,
+        },
+      ],
+      createdAt: now,
+      updatedAt: now,
+    });
+    
+    // 通知后台开始执行任务
+    chrome.runtime.sendMessage({
+      type: 'START_PUBLISH_JOB',
+      data: { jobId },
+    });
+    
+    // 关闭对话框
+    closePublishDialog();
+    
+    // 显示成功提示
+    alert(`发布任务已创建！\n将发布到 ${targets.length} 个平台\n\n您可以在"任务中心"查看进度`);
+    
+    // 跳转到任务中心
+    window.location.hash = 'tasks';
+    
+  } catch (error: any) {
+    console.error('创建发布任务失败:', error);
+    alert('发布失败: ' + error.message);
+  } finally {
+    publishing.value = false;
+  }
 }
 
 onMounted(load);

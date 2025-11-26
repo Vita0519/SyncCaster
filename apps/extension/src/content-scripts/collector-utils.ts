@@ -14,11 +14,67 @@ export interface CollectedImage {
   source?: 'img' | 'picture' | 'noscript' | 'background';
 }
 
+export function normalizeBlockSpacing(container: HTMLElement): void {
+  const isEmptyNode = (el: HTMLElement) => {
+    const text = (el.textContent || '').replace(/\u00A0/g, ' ').trim();
+    if (text) return false;
+    if (el.querySelector('img, picture, video, table, pre, code, [data-sync-math]')) return false;
+    return true;
+  };
+
+  const compressBrs = (node: Element) => {
+    const ch = Array.from(node.childNodes);
+    let lastWasBr = false;
+    for (const n of ch) {
+      if (n.nodeType === Node.ELEMENT_NODE) {
+        if ((n as Element).tagName.toLowerCase() === 'br') {
+          if (lastWasBr) {
+            node.removeChild(n);
+            continue;
+          }
+          lastWasBr = true;
+        } else {
+          lastWasBr = false;
+          compressBrs(n as Element);
+        }
+      } else if (n.nodeType === Node.TEXT_NODE) {
+        const t = (n.textContent || '');
+        if (/^\s+$/.test(t)) {
+          const prev = n.previousSibling;
+          const next = n.nextSibling;
+          if ((prev && (prev as any).tagName === 'BR') || (next && (next as any).tagName === 'BR')) {
+            node.removeChild(n);
+          }
+        }
+      }
+    }
+  };
+
+  compressBrs(container);
+
+  const blocks = container.querySelectorAll('p, div, h1, h2, h3, h4, h5, h6, li, blockquote, pre, figure, section, article');
+  blocks.forEach((el) => {
+    const e = el as HTMLElement;
+    if (isEmptyNode(e)) e.remove();
+  });
+
+  const trimEdges = (el: HTMLElement) => {
+    while (el.firstChild && ((el.firstChild as any).tagName === 'BR' || (el.firstChild.nodeType === Node.TEXT_NODE && /^\s*$/.test(el.firstChild.textContent || '')))) {
+      el.removeChild(el.firstChild);
+    }
+    while (el.lastChild && ((el.lastChild as any).tagName === 'BR' || (el.lastChild.nodeType === Node.TEXT_NODE && /^\s*$/.test(el.lastChild.textContent || '')))) {
+      el.removeChild(el.lastChild);
+    }
+  };
+  trimEdges(container);
+}
+
 export interface CollectedFormula {
   type: 'formula';
   latex: string;
   display: boolean; // true=block, false=inline
   engine: 'katex' | 'mathjax2' | 'mathjax3' | 'mathml' | 'unknown';
+  originalFormat?: string; // 原始格式，如 "$...$" 或 "$$...$$"
 }
 
 export interface ContentMetrics {
@@ -53,7 +109,8 @@ export function extractFormulas(container: HTMLElement): CollectedFormula[] {
     if (annotation) {
       const latex = annotation.textContent || '';
       const display = el.classList.contains('katex-display');
-      formulas.push({ type: 'formula', latex, display, engine: 'katex' });
+      const originalFormat = display ? `$$${latex}$$` : `$${latex}$`;
+      formulas.push({ type: 'formula', latex, display, engine: 'katex', originalFormat });
       
       // 替换为占位符
       const placeholder = document.createElement('span');
@@ -68,7 +125,8 @@ export function extractFormulas(container: HTMLElement): CollectedFormula[] {
   container.querySelectorAll('script[type*="math/tex"]').forEach((el) => {
     const latex = el.textContent || '';
     const display = el.getAttribute('type')?.includes('mode=display') || false;
-    formulas.push({ type: 'formula', latex, display, engine: 'mathjax2' });
+    const originalFormat = display ? `\\[${latex}\\]` : `\\(${latex}\\)`;
+    formulas.push({ type: 'formula', latex, display, engine: 'mathjax2', originalFormat });
     
     const placeholder = document.createElement('span');
     placeholder.setAttribute('data-sync-math', 'true');
@@ -84,7 +142,8 @@ export function extractFormulas(container: HTMLElement): CollectedFormula[] {
       // 简化：直接取MathML文本作为LaTeX（实际应转换）
       const latex = mathEl.textContent || '';
       const display = el.classList.contains('MJXc-display') || el.hasAttribute('display');
-      formulas.push({ type: 'formula', latex, display, engine: 'mathjax3' });
+      const originalFormat = display ? `$$${latex}$$` : `$${latex}$`;
+      formulas.push({ type: 'formula', latex, display, engine: 'mathjax3', originalFormat });
       
       const placeholder = document.createElement('span');
       placeholder.setAttribute('data-sync-math', 'true');
@@ -99,7 +158,8 @@ export function extractFormulas(container: HTMLElement): CollectedFormula[] {
     if (!el.closest('[data-sync-math]')) {
       const latex = el.textContent || '';
       const display = el.getAttribute('display') === 'block';
-      formulas.push({ type: 'formula', latex, display, engine: 'mathml' });
+      const originalFormat = display ? `$$${latex}$$` : `$${latex}$`;
+      formulas.push({ type: 'formula', latex, display, engine: 'mathml', originalFormat });
       
       const placeholder = document.createElement('span');
       placeholder.setAttribute('data-sync-math', 'true');

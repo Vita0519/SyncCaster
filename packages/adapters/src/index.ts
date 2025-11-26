@@ -2,19 +2,37 @@ export * from './base';
 export * from './wechat';
 export * from './zhihu';
 export * from './juejin';
+export * from './csdn';
+export * from './jianshu';
+export * from './cnblogs';
+export * from './51cto';
+export * from './tencent-cloud';
+export * from './aliyun';
+export * from './segmentfault';
+export * from './bilibili';
 
 import { registry } from './base';
 import { wechatAdapter } from './wechat';
 import { zhihuAdapter } from './zhihu';
 import { juejinAdapter } from './juejin';
+import { csdnAdapter } from './csdn';
+import { jianshuAdapter } from './jianshu';
+import { cnblogsAdapter } from './cnblogs';
+import { cto51Adapter } from './51cto';
+import { tencentCloudAdapter } from './tencent-cloud';
+import { aliyunAdapter } from './aliyun';
+import { segmentfaultAdapter } from './segmentfault';
+import { bilibiliAdapter } from './bilibili';
 
 // 注册所有适配器
 registry.register(wechatAdapter);
 registry.register(zhihuAdapter);
 registry.register(juejinAdapter);
-
-// TODO: 其他平台适配器
-// registry.register(csdnAdapter);
-// registry.register(jianshuAdapter);
-// registry.register(mediumAdapter);
-// registry.register(toutiaoAdapter);
+registry.register(csdnAdapter);
+registry.register(jianshuAdapter);
+registry.register(cnblogsAdapter);
+registry.register(cto51Adapter);
+registry.register(tencentCloudAdapter);
+registry.register(aliyunAdapter);
+registry.register(segmentfaultAdapter);
+registry.register(bilibiliAdapter);

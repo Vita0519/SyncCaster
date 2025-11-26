@@ -1,6 +1,22 @@
 import type { PlatformId, CanonicalPost, Account, AuthSession, AssetRef, LogEntry } from '@synccaster/core';
 
 /**
+ * 适配器类型（发布模式）
+ */
+export type AdapterKind = 'dom' | 'metaweblog' | 'restApi';
+
+/**
+ * 会话状态
+ */
+export interface SessionStatus {
+  loggedIn: boolean;
+  username?: string;
+  userId?: string;
+  needsReauth?: boolean;
+  meta?: Record<string, any>;
+}
+
+/**
  * 平台能力描述
  */
 export interface PlatformCapabilities {
@@ -84,8 +100,14 @@ export interface DOMAutomation {
 export interface PlatformAdapter {
   id: PlatformId;
   name: string;
+  kind: AdapterKind;
   icon?: string;
   capabilities: PlatformCapabilities;
+
+  /**
+   * 检测会话状态（可选）
+   */
+  detectSession?(): Promise<SessionStatus>;
 
   /**
    * 确保认证有效

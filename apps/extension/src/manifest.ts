@@ -67,17 +67,41 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
       'sidePanel',
       'downloads',
       'activeTab',
+      'cookies',  // ✨ 必需：读取 Cookie 以检测登录状态
     ],
 
     // 主机权限
     host_permissions: [
+      // 微信公众号
       'https://mp.weixin.qq.com/*',
+      
+      // 知乎
+      'https://*.zhihu.com/*',
+      'https://www.zhihu.com/*',
       'https://zhuanlan.zhihu.com/*',
+      
+      // 掘金
+      'https://*.juejin.cn/*',
       'https://juejin.cn/*',
-      'https://editor.csdn.net/*',
+      'https://api.juejin.cn/*',
+      
+      // CSDN
+      'https://*.csdn.net/*',
       'https://blog.csdn.net/*',
+      'https://editor.csdn.net/*',
+      'https://me.csdn.net/*',
+      'https://passport.csdn.net/*',
+      
+      // 简书
+      'https://*.jianshu.com/*',
       'https://www.jianshu.com/*',
+      
+      // Medium
+      'https://*.medium.com/*',
       'https://medium.com/*',
+      
+      // 今日头条
+      'https://*.toutiao.com/*',
       'https://mp.toutiao.com/*',
     ],
 
@@ -148,18 +172,41 @@ const manifest = {
     'sidePanel',
     'downloads',
     'activeTab',
+    'cookies',  // ✨ 必需：读取 Cookie 以检测登录状态
   ],
 
   // 主机权限
   host_permissions: [
+    // 微信公众号
     'https://mp.weixin.qq.com/*',
-    'https://zhuanlan.zhihu.com/*',
+    
+    // 知乎
+    'https://*.zhihu.com/*',
     'https://www.zhihu.com/*',
+    'https://zhuanlan.zhihu.com/*',
+    
+    // 掘金
+    'https://*.juejin.cn/*',
     'https://juejin.cn/*',
-    'https://editor.csdn.net/*',
+    'https://api.juejin.cn/*',
+    
+    // CSDN
+    'https://*.csdn.net/*',
     'https://blog.csdn.net/*',
+    'https://editor.csdn.net/*',
+    'https://me.csdn.net/*',
+    'https://passport.csdn.net/*',
+    
+    // 简书
+    'https://*.jianshu.com/*',
     'https://www.jianshu.com/*',
+    
+    // Medium
+    'https://*.medium.com/*',
     'https://medium.com/*',
+    
+    // 今日头条
+    'https://*.toutiao.com/*',
     'https://mp.toutiao.com/*',
   ],
 

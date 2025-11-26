@@ -12,6 +12,7 @@
     "@synccaster/adapters": "workspace:*",
     "@synccaster/core": "workspace:*",
     "@synccaster/utils": "workspace:*",
+    "marked": "^17.0.0",
     "naive-ui": "^2.36.0",
     "pinia": "^2.1.7",
     "turndown": "^7.2.0",
@@ -20,6 +21,7 @@
     "webextension-polyfill": "^0.10.0"
   },
   "devDependencies": {
+    "@tailwindcss/typography": "^0.5.19",
     "@types/chrome": "^0.0.258",
     "@types/webextension-polyfill": "^0.10.7",
     "@unocss/preset-uno": "^0.58.0",
