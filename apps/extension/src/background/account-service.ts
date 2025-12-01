@@ -1,5 +1,10 @@
 /**
- * 账号服务 - 处理账号添加和认证
+ * 账号服务 - 重构版
+ * 
+ * 核心改进：
+ * 1. 登录检测在 content script 中执行（目标网站页面上下文）
+ * 2. background 只负责协调流程，不直接检测登录
+ * 3. 通过消息机制获取登录状态
  */
 import { db, type Account } from '@synccaster/core';
 import { Logger } from '@synccaster/utils';
@@ -13,769 +18,501 @@ export interface PlatformUserInfo {
   userId: string;
   nickname: string;
   avatar?: string;
-  email?: string;
-  meta?: Record<string, any>;
+  platform: string;
 }
 
 /**
- * 平台认证检测器
+ * 登录状态接口（来自 content script）
  */
-export interface PlatformAuthChecker {
-  /**
-   * 检查用户是否已登录
-   */
-  checkAuth(): Promise<boolean>;
-  
-  /**
-   * 获取用户信息
-   */
-  getUserInfo(): Promise<PlatformUserInfo>;
-  
-  /**
-   * 获取登录 URL
-   */
-  getLoginUrl(): string;
+export interface LoginState {
+  loggedIn: boolean;
+  userId?: string;
+  nickname?: string;
+  avatar?: string;
+  platform?: string;
+  error?: string;
 }
 
 /**
- * 掘金平台认证检测器
+ * 平台配置
  */
-class JuejinAuthChecker implements PlatformAuthChecker {
-  getLoginUrl(): string {
-    return 'https://juejin.cn/login';
-  }
-
-  async checkAuth(): Promise<boolean> {
-    try {
-      const cookies = await chrome.cookies.getAll({
-        domain: '.juejin.cn',
-      });
-      
-      logger.info('juejin-auth', `Found ${cookies.length} cookies for .juejin.cn`);
-      logger.debug('juejin-auth', 'Cookie names:', cookies.map(c => c.name));
-      
-      // 掘金的认证 Cookie 可能有多种：sessionid, sessionid_ss, token
-      const authCookies = cookies.filter(c => 
-        c.name === 'sessionid' || 
-        c.name === 'sessionid_ss' || 
-        c.name === 'token' ||
-        c.name.toLowerCase().includes('session')
-      );
-      
-      if (authCookies.length > 0) {
-        const cookieInfo = authCookies.map(c => `${c.name}=${c.value.substring(0, 10)}...`);
-        logger.info('juejin-auth', `Found auth cookies: ${authCookies.length}`, { 
-          cookies: cookieInfo,
-        });
-        return true;
-      } else {
-        logger.warn('juejin-auth', 'No auth cookie found', { 
-          availableCookies: cookies.map(c => c.name).join(', '),
-        });
-        return false;
-      }
-    } catch (error: any) {
-      logger.error('juejin-auth', 'Failed to check auth', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      return false;
-    }
-  }
-
-  async getUserInfo(): Promise<PlatformUserInfo> {
-    try {
-      // 调用掘金 API 获取当前用户信息
-      const response = await fetch('https://api.juejin.cn/user_api/v1/user/get', {
-        method: 'GET',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      if (!response.ok) {
-        logger.error('juejin-api', `HTTP ${response.status}: ${response.statusText}`);
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data = await response.json();
-      logger.debug('juejin-api', 'API response:', data);
-      
-      if (data.err_no !== 0) {
-        logger.error('juejin-api', `API error: ${data.err_msg}`);
-        throw new Error(data.err_msg || '接口返回错误');
-      }
-
-      if (!data.data) {
-        throw new Error('未返回用户数据，可能未登录');
-      }
-
-      const user = data.data;
-      const userInfo = {
-        userId: user.user_id || user.id || 'unknown',
-        nickname: user.user_name || user.username || '未知用户',
-        avatar: user.avatar_large || user.avatar_url || undefined,
-        meta: {
-          level: user.level || 0,
-          followersCount: user.follower_count || user.followers_count || 0,
-          viewsCount: user.got_view_count || user.views_count || 0,
-        },
-      };
-      
-      logger.info('juejin-auth', 'User info extracted', {
-        userId: userInfo.userId,
-        nickname: userInfo.nickname,
-        hasAvatar: !!userInfo.avatar,
-        level: userInfo.meta.level,
-      });
-      
-      return userInfo;
-    } catch (error: any) {
-      logger.error('juejin-auth', 'Failed to get user info', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      throw new Error(`无法获取掘金用户信息: ${error.message}`);
-    }
-  }
+interface PlatformConfig {
+  id: string;
+  name: string;
+  loginUrl: string;
+  homeUrl: string;  // 登录后的主页，用于检测登录状态
+  urlPattern: RegExp;
 }
 
 /**
- * CSDN 平台认证检测器
+ * 平台配置表
  */
-class CSDNAuthChecker implements PlatformAuthChecker {
-  getLoginUrl(): string {
-    return 'https://passport.csdn.net/login';
-  }
-
-  async checkAuth(): Promise<boolean> {
-    try {
-      const cookies = await chrome.cookies.getAll({
-        domain: '.csdn.net',
-      });
-      
-      logger.info('csdn-auth', `Found ${cookies.length} cookies for .csdn.net`);
-      logger.debug('csdn-auth', 'Cookie names:', cookies.map(c => c.name));
-      
-      // CSDN 的认证 Cookie：dp_token（新版本）或 UserName（旧版本）
-      const dpToken = cookies.find(c => c.name === 'dp_token');
-      const username = cookies.find(c => c.name === 'UserName');
-      const authCookie = dpToken || username;
-      
-      if (authCookie) {
-        logger.info('csdn-auth', `Found auth cookie: ${authCookie.name}`, { 
-          hasValue: authCookie.value.length > 0,
-          domain: authCookie.domain,
-        });
-        return authCookie.value.length > 0;
-      } else {
-        logger.warn('csdn-auth', 'No auth cookie found', { 
-          availableCookies: cookies.map(c => c.name).join(', '),
-        });
-        return false;
-      }
-    } catch (error: any) {
-      logger.error('csdn-auth', 'Failed to check auth', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      return false;
-    }
-  }
-
-  async getUserInfo(): Promise<PlatformUserInfo> {
-    try {
-      // CSDN 获取当前用户信息
-      // 方案1: 尝试调用 CSDN API
-      logger.info('csdn-auth', 'Fetching user info from API...');
-      
-      try {
-        const response = await fetch('https://me.csdn.net/api/user/show', {
-          method: 'GET',
-          credentials: 'include',
-          headers: {
-            'Accept': 'application/json',
-          },
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          logger.info('csdn-auth', 'Got user info from API', data);
-          
-          if (data.data) {
-            const user = data.data;
-            const userInfo = {
-              userId: user.username || user.userName || user.user_name || user.id,
-              nickname: user.nickname || user.nickName || user.nick_name || user.username || user.userName,
-              avatar: user.avatar || user.avatarUrl || user.avatar_url || user.avatarurl,
-              meta: {
-                username: user.username || user.userName,
-                level: user.level,
-              },
-            };
-            logger.info('csdn-auth', 'User info extracted from API', {
-              userId: userInfo.userId,
-              nickname: userInfo.nickname,
-              hasAvatar: !!userInfo.avatar,
-            });
-            return userInfo;
-          }
-        } else {
-          logger.warn('csdn-auth', `API response not ok: ${response.status}`);
-        }
-      } catch (apiError: any) {
-        logger.warn('csdn-auth', 'API method failed, trying cookie method', { 
-          error: apiError.message,
-        });
-      }
-      
-      // 方案2: 从 Cookie 中获取（旧版本兼容）
-      const cookies = await chrome.cookies.getAll({ domain: '.csdn.net' });
-      const usernameCookie = cookies.find(c => c.name === 'UserName');
-      const userInfoCookie = cookies.find(c => c.name === 'UserInfo');
-      
-      if (usernameCookie && usernameCookie.value) {
-        const username = decodeURIComponent(usernameCookie.value);
-        logger.info('csdn-auth', `Got username from cookie: ${username}`);
-        
-        let userInfo: any = {};
-        if (userInfoCookie && userInfoCookie.value) {
-          try {
-            userInfo = JSON.parse(decodeURIComponent(userInfoCookie.value));
-            logger.debug('csdn-auth', 'Parsed UserInfo cookie', userInfo);
-          } catch (e: any) {
-            logger.warn('csdn-auth', 'Failed to parse UserInfo cookie', { error: e.message });
-          }
-        }
-        
-        const result = {
-          userId: username,
-          nickname: userInfo.UserNick || userInfo.userNick || userInfo.nickname || username,
-          avatar: userInfo.Avatar || userInfo.avatar || userInfo.avatarUrl || `https://profile.csdnimg.cn/0/0/0/0_${username}`,
-          meta: {
-            username: username,
-          },
-        };
-        
-        logger.info('csdn-auth', 'User info from cookie', {
-          userId: result.userId,
-          nickname: result.nickname,
-          hasAvatar: !!result.avatar && !result.avatar.includes('0/0/0/0'),
-        });
-        
-        return result;
-      }
-      
-      // 方案3: 通过注入脚本获取页面中的用户信息
-      logger.info('csdn-auth', 'Trying to get user info from CSDN page...');
-      
-      try {
-        // 查找或创建 CSDN 标签页
-        const tabs = await chrome.tabs.query({ url: 'https://*.csdn.net/*' });
-        let tab = tabs.find(t => t.url?.includes('blog.csdn.net') || t.url?.includes('www.csdn.net'));
-        
-        if (!tab) {
-          // 创建新标签页访问 CSDN
-          logger.info('csdn-auth', 'Creating CSDN tab...');
-          tab = await chrome.tabs.create({ 
-            url: 'https://blog.csdn.net/',
-            active: false,
-          });
-          // 等待页面加载
-          await new Promise(resolve => setTimeout(resolve, 3000));
-        }
-        
-        if (!tab.id) {
-          throw new Error('无法创建或找到 CSDN 标签页');
-        }
-        
-        // 注入脚本获取用户信息
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          func: () => {
-            // 尝试从多个选择器获取昵称
-            const nicknameSelectors = [
-              '.user-profile-head-name-username',
-              '.user-profile-head .username',
-              '.user-profile .nickname',
-              '.toolbar-container-middle .name',
-              '.csdn-profile-nickname',
-              '[data-username]',
-            ];
-            
-            let nicknameElement: Element | null = null;
-            for (const selector of nicknameSelectors) {
-              nicknameElement = document.querySelector(selector);
-              if (nicknameElement) break;
-            }
-            
-            // 尝试从多个选择器获取头像
-            const avatarSelectors = [
-              '.user-profile-head .avatar img',
-              '.toolbar-container-left img',
-              '.csdn-profile-avatar img',
-              '.user-info .avatar img',
-              '.user-avatar img',
-            ];
-            
-            let avatarElement: HTMLImageElement | null = null;
-            for (const selector of avatarSelectors) {
-              const img = document.querySelector(selector) as HTMLImageElement;
-              if (img && img.src && !img.src.includes('default')) {
-                avatarElement = img;
-                break;
-              }
-            }
-            
-            // 尝试从全局变量获取
-            const globalUsername = (window as any).csdn_username || 
-                                   (window as any).userName;
-            const globalNickname = (window as any).userNick || 
-                                   (window as any).nickname;
-            
-            const username = globalUsername || 
-                           nicknameElement?.textContent?.trim() || 
-                           nicknameElement?.getAttribute('data-username');
-            
-            const nickname = globalNickname || 
-                           nicknameElement?.textContent?.trim() || 
-                           username;
-            
-            if (username) {
-              return {
-                username: username,
-                nickname: nickname,
-                avatar: avatarElement?.src || undefined,
-              };
-            }
-            
-            return null;
-          },
-        });
-        
-        if (results && results[0]?.result) {
-          const userData = results[0].result;
-          logger.info('csdn-auth', 'Got user info from page', userData);
-          
-          if (userData.username) {
-            const result = {
-              userId: userData.username,
-              nickname: userData.nickname || userData.username,
-              avatar: userData.avatar || undefined,
-              meta: {
-                username: userData.username,
-              },
-            };
-            
-            logger.info('csdn-auth', 'User info extracted from page', {
-              userId: result.userId,
-              nickname: result.nickname,
-              hasAvatar: !!result.avatar,
-            });
-            
-            return result;
-          }
-        }
-      } catch (scriptError: any) {
-        logger.warn('csdn-auth', 'Script injection failed', { 
-          error: scriptError.message,
-        });
-      }
-      
-      throw new Error('无法获取用户信息，请先访问 CSDN 网站（如 blog.csdn.net）并确保已登录');
-      
-    } catch (error: any) {
-      logger.error('csdn-auth', 'Failed to get user info', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      throw new Error(`无法获取 CSDN 用户信息: ${error.message}`);
-    }
-  }
-}
-
-/**
- * 知乎平台认证检测器
- */
-class ZhihuAuthChecker implements PlatformAuthChecker {
-  getLoginUrl(): string {
-    return 'https://www.zhihu.com/signin';
-  }
-
-  async checkAuth(): Promise<boolean> {
-    try {
-      const cookies = await chrome.cookies.getAll({
-        domain: '.zhihu.com',
-      });
-      
-      logger.info('zhihu-auth', `Found ${cookies.length} cookies for .zhihu.com`);
-      logger.debug('zhihu-auth', 'Cookie names:', cookies.map(c => c.name));
-      
-      // 知乎的认证 Cookie：z_c0
-      const authCookie = cookies.find(c => c.name === 'z_c0');
-      
-      if (authCookie) {
-        logger.info('zhihu-auth', 'Found z_c0 cookie', { 
-          hasValue: authCookie.value.length > 0,
-          domain: authCookie.domain,
-          secure: authCookie.secure,
-        });
-        return authCookie.value.length > 0;
-      } else {
-        logger.warn('zhihu-auth', 'z_c0 cookie not found', { 
-          availableCookies: cookies.map(c => c.name).join(', '),
-        });
-        return false;
-      }
-    } catch (error: any) {
-      logger.error('zhihu-auth', 'Failed to check auth', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      return false;
-    }
-  }
-
-  async getUserInfo(): Promise<PlatformUserInfo> {
-    try {
-      const response = await fetch('https://www.zhihu.com/api/v4/me', {
-        method: 'GET',
-        credentials: 'include',
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch user info');
-      }
-
-      const data = await response.json();
-      
-      const userInfo = {
-        userId: data.id,
-        nickname: data.name,
-        avatar: data.avatar_url || data.avatar_url_template?.replace('{size}', 'xl') || undefined,
-        meta: {
-          headline: data.headline,
-          followersCount: data.follower_count,
-        },
-      };
-      
-      logger.info('zhihu-auth', 'User info extracted', {
-        userId: userInfo.userId,
-        nickname: userInfo.nickname,
-        hasAvatar: !!userInfo.avatar,
-      });
-      
-      return userInfo;
-    } catch (error: any) {
-      logger.error('zhihu-auth', 'Failed to get user info', { error: error.message });
-      throw new Error('无法获取知乎用户信息，请确保已登录');
-    }
-  }
-}
-
-/**
- * 微信公众号 - 需要扫码登录
- */
-class WeChatAuthChecker implements PlatformAuthChecker {
-  getLoginUrl(): string {
-    return 'https://mp.weixin.qq.com';
-  }
-
-  async checkAuth(): Promise<boolean> {
-    try {
-      const cookies = await chrome.cookies.getAll({
-        domain: '.weixin.qq.com',
-      });
-      
-      logger.info('wechat-auth', `Found ${cookies.length} cookies for .weixin.qq.com`);
-      logger.debug('wechat-auth', 'Cookie names:', cookies.map(c => c.name));
-      
-      // 微信公众号的认证 Cookie 可能有多种：token, data_ticket, slave_sid, etc.
-      const authCookies = cookies.filter(c => 
-        c.name === 'token' || 
-        c.name === 'slave_sid' ||
-        c.name === 'data_ticket' ||
-        c.name.toLowerCase().includes('ticket') ||
-        c.name.toLowerCase().includes('sid')
-      );
-      
-      if (authCookies.length > 0) {
-        const cookieInfo = authCookies.map(c => `${c.name}=${c.value.substring(0, 10)}...`);
-        logger.info('wechat-auth', `Found auth cookies: ${authCookies.length}`, { 
-          cookies: cookieInfo,
-        });
-        return true;
-      } else {
-        logger.warn('wechat-auth', 'No auth cookie found', { 
-          availableCookies: cookies.map(c => c.name).join(', '),
-        });
-        return false;
-      }
-    } catch (error: any) {
-      logger.error('wechat-auth', 'Failed to check auth', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      return false;
-    }
-  }
-
-  async getUserInfo(): Promise<PlatformUserInfo> {
-    try {
-      logger.info('wechat-auth', 'Getting user info from WeChat MP page...');
-      
-      // 查找已打开的微信公众号标签页
-      const tabs = await chrome.tabs.query({ url: 'https://mp.weixin.qq.com/*' });
-      let tab = tabs[0];
-      
-      if (!tab) {
-        // 创建新标签页
-        logger.info('wechat-auth', 'Creating WeChat MP tab...');
-        tab = await chrome.tabs.create({ 
-          url: 'https://mp.weixin.qq.com',
-          active: false,
-        });
-        // 等待页面加载
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      }
-      
-      if (!tab.id) {
-        throw new Error('无法创建或找到微信公众号标签页');
-      }
-      
-      // 注入脚本获取用户信息
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => {
-          // 尝试从多个选择器获取昵称
-          const nicknameSelectors = [
-            '.weui-desktop-account__nickname',
-            '.account_nickname',
-            '.weui-desktop-account-nickname',
-            '.nickname',
-            '[class*="nickname"]',
-            '[class*="account"]',
-          ];
-          
-          let nicknameElement: Element | null = null;
-          for (const selector of nicknameSelectors) {
-            nicknameElement = document.querySelector(selector);
-            if (nicknameElement && nicknameElement.textContent?.trim()) break;
-          }
-          
-          // 尝试从多个选择器获取头像
-          const avatarSelectors = [
-            '.weui-desktop-account__avatar img',
-            '.account_avatar img',
-            '.weui-desktop-account-avatar img',
-            '.avatar img',
-            '[class*="avatar"] img',
-          ];
-          
-          let avatarElement: HTMLImageElement | null = null;
-          for (const selector of avatarSelectors) {
-            const img = document.querySelector(selector) as HTMLImageElement;
-            if (img && img.src && img.src.startsWith('http')) {
-              avatarElement = img;
-              break;
-            }
-          }
-          
-          // 尝试从全局变量获取
-          const globalUserInfo = (window as any).user_name || 
-                                (window as any).userName || 
-                                (window as any).nickname;
-          
-          // 尝试从页面标题获取（如 "XXX的公众号"）
-          const title = document.title;
-          const titleMatch = title.match(/(.+?)的公众号/);
-          
-          const nickname = globalUserInfo || 
-                         nicknameElement?.textContent?.trim() || 
-                         titleMatch?.[1] ||
-                         '微信公众号用户';
-          
-          return {
-            nickname: nickname,
-            avatar: avatarElement?.src || undefined,
-            fromPage: true,
-          };
-        },
-      });
-      
-      if (results && results[0]?.result) {
-        const userData = results[0].result;
-        logger.info('wechat-auth', 'Got user info from page', userData);
-        
-        // 生成一个唯一ID（因为微信公众号没有公开的用户ID）
-        const userId = `wechat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        
-        const userInfo = {
-          userId: userId,
-          nickname: userData.nickname,
-          avatar: userData.avatar || undefined,
-          meta: {
-            fromPage: true,
-            addedAt: Date.now(),
-          },
-        };
-        
-        logger.info('wechat-auth', 'User info extracted', {
-          userId: userInfo.userId,
-          nickname: userInfo.nickname,
-          hasAvatar: !!userInfo.avatar,
-          avatarUrl: userInfo.avatar?.substring(0, 50) + '...',
-        });
-        
-        return userInfo;
-      }
-      
-      throw new Error('无法获取用户信息，请先访问微信公众号后台并确保已登录');
-      
-    } catch (error: any) {
-      logger.error('wechat-auth', 'Failed to get user info', { 
-        error: error.message,
-        stack: error.stack,
-      });
-      throw new Error(`无法获取微信公众号用户信息: ${error.message}`);
-    }
-  }
-}
-
-/**
- * 平台认证检测器工厂
- */
-export const AUTH_CHECKERS: Record<string, PlatformAuthChecker> = {
-  juejin: new JuejinAuthChecker(),
-  csdn: new CSDNAuthChecker(),
-  zhihu: new ZhihuAuthChecker(),
-  wechat: new WeChatAuthChecker(),
+const PLATFORMS: Record<string, PlatformConfig> = {
+  juejin: {
+    id: 'juejin',
+    name: '掘金',
+    loginUrl: 'https://juejin.cn/login',
+    homeUrl: 'https://juejin.cn/',
+    urlPattern: /juejin\.cn/,
+  },
+  csdn: {
+    id: 'csdn',
+    name: 'CSDN',
+    loginUrl: 'https://passport.csdn.net/login',
+    homeUrl: 'https://www.csdn.net/',
+    urlPattern: /csdn\.net/,
+  },
+  zhihu: {
+    id: 'zhihu',
+    name: '知乎',
+    loginUrl: 'https://www.zhihu.com/signin',
+    homeUrl: 'https://www.zhihu.com/',
+    urlPattern: /zhihu\.com/,
+  },
+  wechat: {
+    id: 'wechat',
+    name: '微信公众号',
+    loginUrl: 'https://mp.weixin.qq.com/',
+    homeUrl: 'https://mp.weixin.qq.com/',
+    urlPattern: /mp\.weixin\.qq\.com/,
+  },
+  jianshu: {
+    id: 'jianshu',
+    name: '简书',
+    loginUrl: 'https://www.jianshu.com/sign_in',
+    homeUrl: 'https://www.jianshu.com/',
+    urlPattern: /jianshu\.com/,
+  },
+  cnblogs: {
+    id: 'cnblogs',
+    name: '博客园',
+    loginUrl: 'https://account.cnblogs.com/signin',
+    homeUrl: 'https://www.cnblogs.com/',
+    urlPattern: /cnblogs\.com/,
+  },
+  '51cto': {
+    id: '51cto',
+    name: '51CTO',
+    loginUrl: 'https://home.51cto.com/index',
+    homeUrl: 'https://home.51cto.com/',
+    urlPattern: /51cto\.com/,
+  },
+  'tencent-cloud': {
+    id: 'tencent-cloud',
+    name: '腾讯云开发者社区',
+    loginUrl: 'https://cloud.tencent.com/login',
+    homeUrl: 'https://cloud.tencent.com/developer',
+    urlPattern: /cloud\.tencent\.com/,
+  },
+  aliyun: {
+    id: 'aliyun',
+    name: '阿里云开发者社区',
+    loginUrl: 'https://account.aliyun.com/login/login.htm',
+    homeUrl: 'https://developer.aliyun.com/',
+    urlPattern: /aliyun\.com/,
+  },
+  segmentfault: {
+    id: 'segmentfault',
+    name: '思否',
+    loginUrl: 'https://segmentfault.com/user/login',
+    homeUrl: 'https://segmentfault.com/',
+    urlPattern: /segmentfault\.com/,
+  },
+  bilibili: {
+    id: 'bilibili',
+    name: 'B站专栏',
+    loginUrl: 'https://passport.bilibili.com/login',
+    homeUrl: 'https://www.bilibili.com/',
+    urlPattern: /bilibili\.com/,
+  },
+  oschina: {
+    id: 'oschina',
+    name: '开源中国',
+    loginUrl: 'https://www.oschina.net/home/login',
+    homeUrl: 'https://www.oschina.net/',
+    urlPattern: /oschina\.net/,
+  },
 };
 
 /**
  * 平台名称映射
  */
-const PLATFORM_NAMES: Record<string, string> = {
-  juejin: '掘金',
-  csdn: 'CSDN',
-  zhihu: '知乎',
-  wechat: '微信公众号',
-  jianshu: '简书',
-  medium: 'Medium',
-  toutiao: '今日头条',
-};
+const PLATFORM_NAMES: Record<string, string> = Object.fromEntries(
+  Object.values(PLATFORMS).map(p => [p.id, p.name])
+);
+
+
+/**
+ * 确保 content script 已注入到标签页
+ */
+async function ensureContentScriptInjected(tabId: number): Promise<void> {
+  try {
+    // 先尝试发送 PING 消息检查 content script 是否已存在
+    await new Promise<void>((resolve, reject) => {
+      chrome.tabs.sendMessage(tabId, { type: 'PING' }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error('Content script not ready'));
+        } else if (response?.pong) {
+          resolve();
+        } else {
+          reject(new Error('Invalid response'));
+        }
+      });
+    });
+    logger.info('inject', 'Content script already exists');
+  } catch {
+    // Content script 不存在，需要注入
+    logger.info('inject', 'Injecting content script...');
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['content-scripts.js'],
+      });
+      // 等待 content script 初始化
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      logger.info('inject', 'Content script injected successfully');
+    } catch (e: any) {
+      logger.error('inject', 'Failed to inject content script', { error: e.message });
+      throw new Error(`无法注入脚本: ${e.message}`);
+    }
+  }
+}
+
+/**
+ * 向指定标签页发送消息并等待响应
+ */
+async function sendMessageToTab(tabId: number, message: any, timeout = 10000): Promise<any> {
+  // 先确保 content script 已注入
+  await ensureContentScriptInjected(tabId);
+  
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('消息响应超时'));
+    }, timeout);
+    
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      clearTimeout(timer);
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve(response);
+      }
+    });
+  });
+}
+
+/**
+ * 等待标签页加载完成
+ */
+async function waitForTabLoad(tabId: number, timeout = 30000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('页面加载超时'));
+    }, timeout);
+    
+    const checkStatus = async () => {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.status === 'complete') {
+          clearTimeout(timer);
+          // 额外等待一下让页面渲染
+          setTimeout(resolve, 500);
+        } else {
+          setTimeout(checkStatus, 500);
+        }
+      } catch (e) {
+        clearTimeout(timer);
+        reject(new Error('标签页已关闭'));
+      }
+    };
+    
+    checkStatus();
+  });
+}
+
+/**
+ * 在指定标签页检测登录状态
+ */
+async function checkLoginInTab(tabId: number): Promise<LoginState> {
+  try {
+    // 等待页面加载
+    await waitForTabLoad(tabId);
+    
+    // 发送检测请求到 content script
+    const result = await sendMessageToTab(tabId, { type: 'CHECK_LOGIN' });
+    logger.info('check-login', '收到登录检测结果', result);
+    return result;
+  } catch (error: any) {
+    logger.error('check-login', '登录检测失败', { error: error.message });
+    return { loggedIn: false, error: error.message };
+  }
+}
+
+/**
+ * 查找指定平台的已打开标签页
+ */
+async function findPlatformTab(platform: string): Promise<chrome.tabs.Tab | null> {
+  const config = PLATFORMS[platform];
+  if (!config) return null;
+  
+  const tabs = await chrome.tabs.query({});
+  for (const tab of tabs) {
+    if (tab.url && config.urlPattern.test(tab.url)) {
+      return tab;
+    }
+  }
+  return null;
+}
+
 
 /**
  * 账号服务
  */
 export class AccountService {
+  // 存储登录成功的回调
+  private static loginCallbacks: Map<string, (state: LoginState) => void> = new Map();
+  
   /**
-   * 添加账号（引导登录）
+   * 初始化：监听来自 content script 的登录成功消息
+   */
+  static init() {
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message.type === 'LOGIN_SUCCESS') {
+        logger.info('login-success', '收到登录成功通知', message.data);
+        const state = message.data as LoginState;
+        
+        // 触发回调
+        if (state.platform) {
+          const callback = this.loginCallbacks.get(state.platform);
+          if (callback) {
+            callback(state);
+            this.loginCallbacks.delete(state.platform);
+          }
+        }
+        
+        sendResponse({ received: true });
+      }
+      
+      if (message.type === 'LOGIN_STATE_REPORT') {
+        logger.info('login-report', '收到登录状态报告', message.data);
+        // 可以用于更新 UI 或缓存登录状态
+        sendResponse({ received: true });
+      }
+    });
+    
+    logger.info('init', '账号服务已初始化');
+  }
+  
+  /**
+   * 快速添加账号（用户已登录）
+   * 
+   * 流程：
+   * 1. 查找当前是否有该平台的标签页
+   * 2. 如果有，向该标签页发送检测请求
+   * 3. 如果没有，打开平台主页并检测
+   * 4. 检测成功则保存账号
+   */
+  static async quickAddAccount(platform: string): Promise<Account> {
+    const platformName = PLATFORM_NAMES[platform] || platform;
+    const config = PLATFORMS[platform];
+    
+    if (!config) {
+      throw new Error(`不支持的平台: ${platformName}`);
+    }
+    
+    logger.info('quick-add', `快速添加账号: ${platformName}`);
+    
+    // 1. 查找已打开的平台标签页
+    let tab = await findPlatformTab(platform);
+    let needCloseTab = false;
+    
+    // 2. 如果没有，打开平台主页
+    if (!tab) {
+      logger.info('quick-add', `未找到 ${platformName} 标签页，打开主页`);
+      tab = await chrome.tabs.create({ url: config.homeUrl, active: false });
+      needCloseTab = true;
+      
+      // 等待页面加载
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    
+    if (!tab.id) {
+      throw new Error('无法创建标签页');
+    }
+    
+    try {
+      // 3. 在标签页中检测登录状态
+      logger.info('quick-add', `在标签页 ${tab.id} 中检测登录状态`);
+      const state = await checkLoginInTab(tab.id);
+      
+      if (!state.loggedIn) {
+        throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
+      }
+      
+      // 4. 保存账号
+      const account = await this.saveAccount(platform, {
+        userId: state.userId || `${platform}_${Date.now()}`,
+        nickname: state.nickname || platformName + '用户',
+        avatar: state.avatar,
+        platform,
+      });
+      
+      logger.info('quick-add', '账号添加成功', { nickname: account.nickname });
+      
+      return account;
+    } finally {
+      // 如果是我们创建的标签页，关闭它
+      if (needCloseTab && tab.id) {
+        try {
+          await chrome.tabs.remove(tab.id);
+        } catch {}
+      }
+    }
+  }
+  
+  /**
+   * 引导登录添加账号
+   * 
+   * 流程：
+   * 1. 打开平台登录页面
+   * 2. 在该页面启动登录状态轮询
+   * 3. 登录成功后，content script 通知 background
+   * 4. 保存账号并关闭登录页面
    */
   static async addAccount(platform: string): Promise<Account> {
     const platformName = PLATFORM_NAMES[platform] || platform;
-    logger.info('add-account', `Adding account for platform: ${platformName}`);
+    const config = PLATFORMS[platform];
     
-    const checker = AUTH_CHECKERS[platform];
-    if (!checker) {
+    if (!config) {
       throw new Error(`不支持的平台: ${platformName}`);
     }
-
+    
+    logger.info('add-account', `引导登录: ${platformName}`);
+    
     // 先检查是否已经登录
-    const alreadyLoggedIn = await checker.checkAuth();
-    if (alreadyLoggedIn) {
-      logger.info('add-account', `User already logged in to ${platformName}, skip login page`);
-      // 已登录，直接获取用户信息
-      const userInfo = await checker.getUserInfo();
-      const account = await this.saveAccount(platform, userInfo);
-      return account;
+    const existingTab = await findPlatformTab(platform);
+    if (existingTab?.id) {
+      const state = await checkLoginInTab(existingTab.id);
+      if (state.loggedIn) {
+        logger.info('add-account', '检测到已登录，直接保存账号');
+        return await this.saveAccount(platform, {
+          userId: state.userId || `${platform}_${Date.now()}`,
+          nickname: state.nickname || platformName + '用户',
+          avatar: state.avatar,
+          platform,
+        });
+      }
     }
-
-    // 1. 打开登录页面
-    const loginUrl = checker.getLoginUrl();
-    logger.info('add-account', `Opening login page: ${loginUrl}`);
-    const tab = await chrome.tabs.create({ url: loginUrl });
+    
+    // 打开登录页面
+    logger.info('add-account', `打开登录页面: ${config.loginUrl}`);
+    const tab = await chrome.tabs.create({ url: config.loginUrl });
     
     if (!tab.id) {
       throw new Error('无法打开登录页面');
     }
     
-    // 2. 等待用户登录
-    logger.info('add-account', 'Waiting for user to login...');
+    // 等待页面加载
+    await waitForTabLoad(tab.id);
     
-    try {
-      // 轮询检查登录状态（最多等待 3 分钟，每 2 秒检查一次）
-      const maxAttempts = 90; // 90 * 2秒 = 3分钟
+    // 创建 Promise 等待登录成功
+    return new Promise<Account>((resolve, reject) => {
+      const tabId = tab.id!;
+      let pollingStopped = false;
       let attempts = 0;
-      let isLoggedIn = false;
-
-      while (attempts < maxAttempts && !isLoggedIn) {
-        // 等待 2 秒
-        await new Promise(resolve => setTimeout(resolve, 2000));
+      const maxAttempts = 180; // 3分钟
+      
+      // 设置登录成功回调
+      this.loginCallbacks.set(platform, async (state) => {
+        pollingStopped = true;
+        logger.info('add-account', '登录成功回调触发', state);
+        
+        try {
+          const account = await this.saveAccount(platform, {
+            userId: state.userId || `${platform}_${Date.now()}`,
+            nickname: state.nickname || platformName + '用户',
+            avatar: state.avatar,
+            platform,
+          });
+          
+          // 关闭登录标签页
+          try {
+            await chrome.tabs.remove(tabId);
+          } catch {}
+          
+          resolve(account);
+        } catch (e: any) {
+          reject(e);
+        }
+      });
+      
+      // 启动轮询检测
+      const poll = async () => {
+        if (pollingStopped) return;
+        
+        attempts++;
+        logger.info('add-account', `轮询检测 ${attempts}/${maxAttempts}`);
         
         // 检查标签页是否还存在
         try {
-          await chrome.tabs.get(tab.id);
+          await chrome.tabs.get(tabId);
         } catch {
-          logger.warn('add-account', 'Login tab was closed by user');
-          throw new Error('登录窗口已关闭，请重试');
+          pollingStopped = true;
+          this.loginCallbacks.delete(platform);
+          reject(new Error('登录窗口已关闭，请重试'));
+          return;
         }
         
-        // 检查是否已登录
+        // 检测登录状态
         try {
-          isLoggedIn = await checker.checkAuth();
-          if (isLoggedIn) {
-            logger.info('add-account', `User logged in successfully (attempt ${attempts + 1})`);
-            break;
+          const state = await checkLoginInTab(tabId);
+          
+          if (state.loggedIn) {
+            pollingStopped = true;
+            this.loginCallbacks.delete(platform);
+            
+            const account = await this.saveAccount(platform, {
+              userId: state.userId || `${platform}_${Date.now()}`,
+              nickname: state.nickname || platformName + '用户',
+              avatar: state.avatar,
+              platform,
+            });
+            
+            // 关闭登录标签页
+            try {
+              await chrome.tabs.remove(tabId);
+            } catch {}
+            
+            resolve(account);
+            return;
           }
-        } catch (error: any) {
-          logger.error('add-account', 'Error checking auth', { error: error.message });
+        } catch (e: any) {
+          logger.warn('add-account', '检测失败', { error: e.message });
         }
         
-        attempts++;
-      }
-
-      if (!isLoggedIn) {
-        throw new Error('登录超时（3分钟），请重试');
-      }
-
-      // 3. 获取用户信息
-      logger.info('add-account', 'Fetching user info...');
-      const userInfo = await checker.getUserInfo();
-
-      // 4. 保存账号
-      const account = await this.saveAccount(platform, userInfo);
-      
-      // 5. 关闭登录标签页
-      if (tab.id) {
-        try {
-          await chrome.tabs.remove(tab.id);
-          logger.info('add-account', 'Login tab closed');
-        } catch (e) {
-          logger.warn('add-account', 'Failed to close login tab');
+        // 继续轮询
+        if (attempts < maxAttempts && !pollingStopped) {
+          setTimeout(poll, 2000);
+        } else if (!pollingStopped) {
+          pollingStopped = true;
+          this.loginCallbacks.delete(platform);
+          
+          // 关闭登录标签页
+          try {
+            await chrome.tabs.remove(tabId);
+          } catch {}
+          
+          reject(new Error('登录超时（3分钟），请重试'));
         }
-      }
-
-      return account;
+      };
       
-    } catch (error: any) {
-      // 关闭登录标签页（如果还存在）
-      if (tab.id) {
-        try {
-          await chrome.tabs.remove(tab.id);
-        } catch {
-          // 忽略
-        }
-      }
-      
-      logger.error('add-account', 'Failed to add account', { error: error.message });
-      throw error;
-    }
+      // 开始轮询
+      setTimeout(poll, 3000); // 等待页面加载后开始
+    });
   }
-
+  
   /**
-   * 保存账号到数据库（辅助方法）
+   * 保存账号到数据库
    */
   private static async saveAccount(platform: string, userInfo: PlatformUserInfo): Promise<Account> {
     const now = Date.now();
@@ -787,84 +524,75 @@ export class AccountService {
       enabled: true,
       createdAt: now,
       updatedAt: now,
-      meta: userInfo.meta,
+      meta: {},
     };
 
     await db.accounts.put(account);
-    logger.info('save-account', 'Account saved', { 
-      platform,
-      nickname: account.nickname,
-      id: account.id,
-    });
-
+    logger.info('save-account', '账号已保存', { platform, nickname: account.nickname });
     return account;
   }
-
-  /**
-   * 快速添加账号（用户已登录）
-   */
-  static async quickAddAccount(platform: string): Promise<Account> {
-    const platformName = PLATFORM_NAMES[platform] || platform;
-    logger.info('quick-add', `Quick adding account for platform: ${platformName}`);
-    
-    const checker = AUTH_CHECKERS[platform];
-    if (!checker) {
-      throw new Error(`不支持的平台: ${platformName}`);
-    }
-
-    // 1. 检查是否已登录
-    logger.info('quick-add', 'Checking login status...');
-    const isLoggedIn = await checker.checkAuth();
-    
-    if (!isLoggedIn) {
-      logger.warn('quick-add', `User not logged in to ${platformName}`);
-      throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
-    }
-    
-    logger.info('quick-add', `User is logged in to ${platformName}`);
-
-    // 2. 获取用户信息
-    logger.info('quick-add', 'Fetching user info...');
-    const userInfo = await checker.getUserInfo();
-
-    // 3. 保存账号
-    const account = await this.saveAccount(platform, userInfo);
-
-    return account;
-  }
-
+  
   /**
    * 检查账号认证状态
    */
   static async checkAccountAuth(account: Account): Promise<boolean> {
-    const checker = AUTH_CHECKERS[account.platform];
-    if (!checker) {
+    const tab = await findPlatformTab(account.platform);
+    if (!tab?.id) {
       return false;
     }
-
-    return await checker.checkAuth();
+    
+    const state = await checkLoginInTab(tab.id);
+    return state.loggedIn;
   }
-
+  
   /**
    * 刷新账号信息
    */
   static async refreshAccount(account: Account): Promise<Account> {
-    const checker = AUTH_CHECKERS[account.platform];
-    if (!checker) {
+    const config = PLATFORMS[account.platform];
+    if (!config) {
       throw new Error(`不支持的平台: ${account.platform}`);
     }
-
-    const userInfo = await checker.getUserInfo();
     
-    const updated: Account = {
-      ...account,
-      nickname: userInfo.nickname,
-      avatar: userInfo.avatar,
-      updatedAt: Date.now(),
-      meta: { ...account.meta, ...userInfo.meta },
-    };
-
-    await db.accounts.put(updated);
-    return updated;
+    // 查找或创建标签页
+    let tab = await findPlatformTab(account.platform);
+    let needCloseTab = false;
+    
+    if (!tab) {
+      tab = await chrome.tabs.create({ url: config.homeUrl, active: false });
+      needCloseTab = true;
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    }
+    
+    if (!tab.id) {
+      throw new Error('无法创建标签页');
+    }
+    
+    try {
+      const state = await checkLoginInTab(tab.id);
+      
+      if (!state.loggedIn) {
+        throw new Error('账号已登出，请重新登录');
+      }
+      
+      const updated: Account = {
+        ...account,
+        nickname: state.nickname || account.nickname,
+        avatar: state.avatar || account.avatar,
+        updatedAt: Date.now(),
+      };
+      
+      await db.accounts.put(updated);
+      return updated;
+    } finally {
+      if (needCloseTab && tab.id) {
+        try {
+          await chrome.tabs.remove(tab.id);
+        } catch {}
+      }
+    }
   }
 }
+
+// 导出用于兼容旧代码
+export const AUTH_CHECKERS = {};

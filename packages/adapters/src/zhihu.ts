@@ -36,7 +36,6 @@ export const zhihuAdapter: PlatformAdapter = {
 
   async transform(post, { config }) {
     // 知乎使用富文本编辑器，优先使用 HTML
-    // 如果有采集的 HTML，使用它；否则用 Markdown
     const contentHtml = (post as any)?.meta?.body_html || '';
     const contentMarkdown = post.body_md;
     
@@ -54,6 +53,7 @@ export const zhihuAdapter: PlatformAdapter = {
   async publish(payload, ctx) {
     throw new Error('zhihu: use DOM automation');
   },
+
 
   dom: {
     matchers: [
@@ -74,60 +74,140 @@ export const zhihuAdapter: PlatformAdapter = {
         throw new Error(`等待元素超时: ${selector}`);
       }
 
+      async function waitForAny(selectors: string[], timeout = 15000): Promise<HTMLElement> {
+        const start = Date.now();
+        while (Date.now() - start < timeout) {
+          for (const selector of selectors) {
+            const el = document.querySelector(selector);
+            if (el) return el as HTMLElement;
+          }
+          await sleep(200);
+        }
+        throw new Error(`等待元素超时: ${selectors.join(', ')}`);
+      }
+
       try {
         // 1. 填充标题
         console.log('[zhihu] Step 1: 填充标题');
-        const titleInput = await waitFor('input[placeholder*="标题"], textarea[placeholder*="标题"]');
+        const titleSelectors = [
+          'input[placeholder*="标题"]',
+          'textarea[placeholder*="标题"]',
+          '.WriteIndex-titleInput input',
+          '.PostEditor-titleInput input',
+        ];
+        const titleInput = await waitForAny(titleSelectors);
+        
+        // 清空并填充标题
+        (titleInput as HTMLInputElement).value = '';
+        titleInput.focus();
         (titleInput as HTMLInputElement).value = (payload as any).title || '';
         titleInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await sleep(300);
+        titleInput.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(500);
 
         // 2. 填充内容 - 知乎使用 contenteditable 富文本编辑器
         console.log('[zhihu] Step 2: 填充内容');
         const content = (payload as any).contentHtml || (payload as any).contentMarkdown || '';
         
-        const editor = await waitFor('[contenteditable="true"], .public-DraftEditor-content');
+        const editorSelectors = [
+          '[contenteditable="true"]',
+          '.public-DraftEditor-content',
+          '.DraftEditor-editorContainer [contenteditable]',
+          '.PostEditor-content [contenteditable]',
+        ];
+        const editor = await waitForAny(editorSelectors);
         editor.focus();
+        await sleep(300);
+        
+        // 清空编辑器
+        editor.innerHTML = '';
         
         // 优先使用 HTML 粘贴
         if ((payload as any).contentHtml) {
-          const dt = new DataTransfer();
-          dt.setData('text/html', content);
-          const pasteEvent = new ClipboardEvent('paste', { clipboardData: dt, bubbles: true });
-          editor.dispatchEvent(pasteEvent);
+          try {
+            const dt = new DataTransfer();
+            dt.setData('text/html', content);
+            dt.setData('text/plain', (payload as any).contentMarkdown || content);
+            const pasteEvent = new ClipboardEvent('paste', { 
+              clipboardData: dt, 
+              bubbles: true,
+              cancelable: true,
+            });
+            editor.dispatchEvent(pasteEvent);
+          } catch (e) {
+            console.warn('[zhihu] HTML paste failed, trying innerHTML', e);
+            editor.innerHTML = content;
+          }
         } else {
           // 降级：直接设置文本
           editor.textContent = content;
-          editor.dispatchEvent(new Event('input', { bubbles: true }));
         }
-        await sleep(500);
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        await sleep(800);
 
         // 3. 点击发布按钮
         console.log('[zhihu] Step 3: 点击发布按钮');
-        const publishBtn = Array.from(document.querySelectorAll('button'))
-          .find(btn => btn.textContent?.includes('发布')) as HTMLElement;
+        const publishBtnSelectors = [
+          'button[type="button"]',
+          '.PublishPanel-triggerButton',
+          '.WriteIndex-publishButton',
+        ];
+        
+        let publishBtn: HTMLElement | null = null;
+        for (const selector of publishBtnSelectors) {
+          const btns = document.querySelectorAll(selector);
+          for (const btn of btns) {
+            if (btn.textContent?.includes('发布')) {
+              publishBtn = btn as HTMLElement;
+              break;
+            }
+          }
+          if (publishBtn) break;
+        }
+        
+        if (!publishBtn) {
+          // 尝试通用查找
+          publishBtn = Array.from(document.querySelectorAll('button'))
+            .find(btn => btn.textContent?.includes('发布')) as HTMLElement;
+        }
+        
         if (!publishBtn) throw new Error('未找到发布按钮');
         publishBtn.click();
         await sleep(1500);
 
-        // 4. 处理发布确认
+        // 4. 处理发布确认弹窗
         console.log('[zhihu] Step 4: 处理发布确认');
-        const confirmBtn = Array.from(document.querySelectorAll('button'))
-          .find(btn => /确认|发布/.test(btn.textContent || '')) as HTMLElement;
-        if (confirmBtn) {
-          confirmBtn.click();
+        await sleep(1000);
+        
+        const confirmBtns = Array.from(document.querySelectorAll('button'))
+          .filter(btn => /确认发布|立即发布|发布文章/.test(btn.textContent || ''));
+        
+        if (confirmBtns.length > 0) {
+          (confirmBtns[0] as HTMLElement).click();
           await sleep(2000);
         }
 
         // 5. 等待跳转获取文章 URL
         console.log('[zhihu] Step 5: 等待文章 URL');
         const checkUrl = () => /zhuanlan\.zhihu\.com\/p\/\d+/.test(window.location.href);
-        for (let i = 0; i < 40; i++) {
+        
+        for (let i = 0; i < 60; i++) {
           if (checkUrl()) {
             console.log('[zhihu] 发布成功:', window.location.href);
             return { url: window.location.href };
           }
           await sleep(500);
+        }
+
+        // 检查是否有成功提示
+        const successTip = document.querySelector('.Notification--success, [class*="success"]');
+        if (successTip) {
+          // 尝试从页面获取链接
+          const link = document.querySelector('a[href*="/p/"]') as HTMLAnchorElement;
+          if (link) {
+            return { url: link.href };
+          }
+          return { url: 'https://zhuanlan.zhihu.com/' };
         }
 
         throw new Error('发布超时：未跳转到文章页');

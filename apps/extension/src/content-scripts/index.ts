@@ -2,6 +2,7 @@
  * Content Script - 优化版
  * 注入到目标网站，执行 DOM 自动化和内容采集
  * 支持：公式提取、图片归一化、表格/代码块保真、质量校验
+ * 新增：登录状态检测（在页面上下文中执行）
  */
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
@@ -17,6 +18,7 @@ import {
   type CollectedImage,
   type ContentMetrics,
 } from './collector-utils';
+import { initAuthDetector, detectLoginState, startLoginPolling } from './auth-detector';
 
 // 采集配置
 const COLLECT_CONFIG = {
@@ -72,6 +74,22 @@ async function handleMessage(message: any) {
     
     case 'PING':
       return { pong: true };
+    
+    case 'CHECK_LOGIN':
+      // 在页面上下文中检测登录状态
+      logInfo('auth', '收到登录检测请求');
+      return await detectLoginState();
+    
+    case 'START_LOGIN_POLLING':
+      // 启动登录状态轮询
+      logInfo('auth', '启动登录轮询');
+      startLoginPolling((state) => {
+        chrome.runtime.sendMessage({
+          type: 'LOGIN_SUCCESS',
+          data: state,
+        });
+      });
+      return { started: true };
     
     default:
       throw new Error(`Unknown message type: ${message.type}`);
@@ -360,6 +378,9 @@ function addFloatingButton() {
   
   document.body.appendChild(button);
 }
+
+// 初始化登录检测器
+initAuthDetector();
 
 // 在支持采集的页面添加浮动按钮
 if (!window.location.href.includes('mp.weixin.qq.com')) {

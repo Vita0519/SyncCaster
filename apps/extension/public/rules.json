@@ -1,0 +1,182 @@
+[
+  {
+    "id": 1,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://juejin.cn" },
+        { "header": "Referer", "operation": "set", "value": "https://juejin.cn/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://api.juejin.cn/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://www.zhihu.com" },
+        { "header": "Referer", "operation": "set", "value": "https://www.zhihu.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.zhihu.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://www.csdn.net" },
+        { "header": "Referer", "operation": "set", "value": "https://www.csdn.net/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.csdn.net/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 4,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://www.jianshu.com" },
+        { "header": "Referer", "operation": "set", "value": "https://www.jianshu.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.jianshu.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 5,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://www.cnblogs.com" },
+        { "header": "Referer", "operation": "set", "value": "https://www.cnblogs.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.cnblogs.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 6,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://segmentfault.com" },
+        { "header": "Referer", "operation": "set", "value": "https://segmentfault.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.segmentfault.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 7,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://www.bilibili.com" },
+        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.bilibili.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 8,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://www.oschina.net" },
+        { "header": "Referer", "operation": "set", "value": "https://www.oschina.net/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.oschina.net/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 9,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://cloud.tencent.com" },
+        { "header": "Referer", "operation": "set", "value": "https://cloud.tencent.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://cloud.tencent.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 10,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://developer.aliyun.com" },
+        { "header": "Referer", "operation": "set", "value": "https://developer.aliyun.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://developer.aliyun.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 11,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://blog.51cto.com" },
+        { "header": "Referer", "operation": "set", "value": "https://blog.51cto.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://*.51cto.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  },
+  {
+    "id": 12,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Origin", "operation": "set", "value": "https://mp.weixin.qq.com" },
+        { "header": "Referer", "operation": "set", "value": "https://mp.weixin.qq.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "*://mp.weixin.qq.com/*",
+      "resourceTypes": ["xmlhttprequest"]
+    }
+  }
+]

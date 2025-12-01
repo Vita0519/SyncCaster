@@ -24,6 +24,9 @@ try {
   logger.warn('v2', 'v2.0 processor import failed', { error: error.message });
 }
 
+// 初始化账号服务（监听登录成功消息）
+AccountService.init();
+
 // 监听扩展安装
 chrome.runtime.onInstalled.addListener(async (details) => {
   logger.info('install', `Extension installed: ${details.reason}`);
@@ -339,6 +342,16 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
         logger.error('learn', 'Failed to fetch/template', { error });
         return { success: false, error: error.message };
       }
+    
+    case 'LOGIN_STATE_REPORT':
+      // 来自 content script 的登录状态报告（页面加载时自动报告）
+      logger.info('auth', 'Login state report received', message.data);
+      return { received: true };
+    
+    case 'LOGIN_SUCCESS':
+      // 来自 content script 的登录成功通知
+      logger.info('auth', 'Login success notification received', message.data);
+      return { received: true };
     
     default:
       throw new Error(`Unknown message type: ${message.type}`);

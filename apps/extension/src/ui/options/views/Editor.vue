@@ -18,7 +18,7 @@
           />
           <button
             @click="copyText(title)"
-            class="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded bg-white/90 hover:bg-gray-100 border border-gray-200 text-gray-500 hover:text-gray-700 transition-all shadow-sm hover:shadow"
+            class="absolute right-1 top-1/2 -translate-y-1/2 p-1.5 rounded bg-white/90 hover:bg-gray-100 border border-gray-200 text-gray-500 hover:text-gray-700 transition-all shadow-sm hover:shadow"
             title="复制标题"
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -39,7 +39,7 @@
           ></textarea>
           <button
             @click="copyText(body)"
-            class="absolute right-3 top-3 p-1.5 rounded bg-white/90 hover:bg-gray-100 border border-gray-200 text-gray-500 hover:text-gray-700 transition-all shadow-sm hover:shadow"
+            class="absolute right-1 top-2 p-1.5 rounded bg-white/90 hover:bg-gray-100 border border-gray-200 text-gray-500 hover:text-gray-700 transition-all shadow-sm hover:shadow"
             title="复制正文"
           >
             <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -419,7 +419,7 @@ async function loadEnabledAccounts() {
   }
 }
 
-// 获取平台名称
+// 获取平台名称（全部12个平台）
 function getPlatformName(platform: string): string {
   const names: Record<string, string> = {
     wechat: '微信公众号',
@@ -427,13 +427,18 @@ function getPlatformName(platform: string): string {
     juejin: '掘金',
     csdn: 'CSDN',
     jianshu: '简书',
-    medium: 'Medium',
-    toutiao: '今日头条',
+    cnblogs: '博客园',
+    '51cto': '51CTO',
+    'tencent-cloud': '腾讯云开发者社区',
+    aliyun: '阿里云开发者社区',
+    segmentfault: '思否',
+    bilibili: 'B站专栏',
+    oschina: '开源中国',
   };
   return names[platform] || platform;
 }
 
-// 获取平台图标
+// 获取平台图标（全部12个平台）
 function getPlatformIcon(platform: string): string {
   const icons: Record<string, string> = {
     wechat: '💚',
@@ -441,8 +446,13 @@ function getPlatformIcon(platform: string): string {
     juejin: '🔷',
     csdn: '📘',
     jianshu: '📝',
-    medium: '📖',
-    toutiao: '📰',
+    cnblogs: '🌿',
+    '51cto': '🔶',
+    'tencent-cloud': '☁️',
+    aliyun: '🧡',
+    segmentfault: '🟢',
+    bilibili: '📺',
+    oschina: '🔴',
   };
   return icons[platform] || '📄';
 }

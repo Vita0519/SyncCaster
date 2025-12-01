@@ -70,10 +70,11 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
       'cookies',  // ✨ 必需：读取 Cookie 以检测登录状态
     ],
 
-    // 主机权限
+    // 主机权限（全部12个平台）
     host_permissions: [
       // 微信公众号
       'https://mp.weixin.qq.com/*',
+      'https://*.weixin.qq.com/*',
       
       // 知乎
       'https://*.zhihu.com/*',
@@ -96,13 +97,42 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
       'https://*.jianshu.com/*',
       'https://www.jianshu.com/*',
       
-      // Medium
-      'https://*.medium.com/*',
-      'https://medium.com/*',
+      // 博客园
+      'https://*.cnblogs.com/*',
+      'https://www.cnblogs.com/*',
+      'https://i.cnblogs.com/*',
+      'https://account.cnblogs.com/*',
+      'https://passport.cnblogs.com/*',
       
-      // 今日头条
-      'https://*.toutiao.com/*',
-      'https://mp.toutiao.com/*',
+      // 51CTO
+      'https://*.51cto.com/*',
+      'https://blog.51cto.com/*',
+      'https://home.51cto.com/*',
+      
+      // 腾讯云开发者社区
+      'https://cloud.tencent.com/*',
+      'https://*.cloud.tencent.com/*',
+      
+      // 阿里云开发者社区
+      'https://developer.aliyun.com/*',
+      'https://*.aliyun.com/*',
+      'https://account.aliyun.com/*',
+      
+      // 思否
+      'https://segmentfault.com/*',
+      'https://*.segmentfault.com/*',
+      
+      // B站专栏
+      'https://*.bilibili.com/*',
+      'https://www.bilibili.com/*',
+      'https://member.bilibili.com/*',
+      'https://api.bilibili.com/*',
+      'https://passport.bilibili.com/*',
+      
+      // 开源中国
+      'https://*.oschina.net/*',
+      'https://www.oschina.net/*',
+      'https://my.oschina.net/*',
     ],
 
     // Web 可访问资源
@@ -175,10 +205,11 @@ const manifest = {
     'cookies',  // ✨ 必需：读取 Cookie 以检测登录状态
   ],
 
-  // 主机权限
+  // 主机权限（全部12个平台）
   host_permissions: [
     // 微信公众号
     'https://mp.weixin.qq.com/*',
+    'https://*.weixin.qq.com/*',
     
     // 知乎
     'https://*.zhihu.com/*',
@@ -201,13 +232,42 @@ const manifest = {
     'https://*.jianshu.com/*',
     'https://www.jianshu.com/*',
     
-    // Medium
-    'https://*.medium.com/*',
-    'https://medium.com/*',
+    // 博客园
+    'https://*.cnblogs.com/*',
+    'https://www.cnblogs.com/*',
+    'https://i.cnblogs.com/*',
+    'https://account.cnblogs.com/*',
+    'https://passport.cnblogs.com/*',
     
-    // 今日头条
-    'https://*.toutiao.com/*',
-    'https://mp.toutiao.com/*',
+    // 51CTO
+    'https://*.51cto.com/*',
+    'https://blog.51cto.com/*',
+    'https://home.51cto.com/*',
+    
+    // 腾讯云开发者社区
+    'https://cloud.tencent.com/*',
+    'https://*.cloud.tencent.com/*',
+    
+    // 阿里云开发者社区
+    'https://developer.aliyun.com/*',
+    'https://*.aliyun.com/*',
+    'https://account.aliyun.com/*',
+    
+    // 思否
+    'https://segmentfault.com/*',
+    'https://*.segmentfault.com/*',
+    
+    // B站专栏
+    'https://*.bilibili.com/*',
+    'https://www.bilibili.com/*',
+    'https://member.bilibili.com/*',
+    'https://api.bilibili.com/*',
+    'https://passport.bilibili.com/*',
+    
+    // 开源中国
+    'https://*.oschina.net/*',
+    'https://www.oschina.net/*',
+    'https://my.oschina.net/*',
   ],
 
   // Web 可访问资源

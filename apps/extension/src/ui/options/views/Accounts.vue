@@ -114,15 +114,20 @@ watch(showAddDialog, (newVal) => {
   }
 });
 
-// 支持的平台列表
+// 支持的平台列表（全部12个平台）
 const platforms = [
   { id: 'juejin', name: '掘金', icon: '🔷' },
   { id: 'csdn', name: 'CSDN', icon: '📘' },
   { id: 'zhihu', name: '知乎', icon: '🔵' },
   { id: 'wechat', name: '微信公众号', icon: '💚' },
   { id: 'jianshu', name: '简书', icon: '📝' },
-  { id: 'medium', name: 'Medium', icon: '📖' },
-  { id: 'toutiao', name: '今日头条', icon: '📰' },
+  { id: 'cnblogs', name: '博客园', icon: '🌿' },
+  { id: '51cto', name: '51CTO', icon: '🔶' },
+  { id: 'tencent-cloud', name: '腾讯云开发者社区', icon: '☁️' },
+  { id: 'aliyun', name: '阿里云开发者社区', icon: '🧡' },
+  { id: 'segmentfault', name: '思否', icon: '🟢' },
+  { id: 'bilibili', name: 'B站专栏', icon: '📺' },
+  { id: 'oschina', name: '开源中国', icon: '🔴' },
 ];
 
 onMounted(async () => {
@@ -145,8 +150,13 @@ function getPlatformName(platform: string) {
     juejin: '掘金',
     csdn: 'CSDN',
     jianshu: '简书',
-    medium: 'Medium',
-    toutiao: '今日头条',
+    cnblogs: '博客园',
+    '51cto': '51CTO',
+    'tencent-cloud': '腾讯云开发者社区',
+    aliyun: '阿里云开发者社区',
+    segmentfault: '思否',
+    bilibili: 'B站专栏',
+    oschina: '开源中国',
   };
   return names[platform] || platform;
 }
