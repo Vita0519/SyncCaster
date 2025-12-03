@@ -2,9 +2,14 @@
   <div>
     <div class="flex-between mb-6">
       <h2 class="text-2xl font-bold text-gray-800">账号管理</h2>
-      <n-button type="primary" @click="showAddDialog = true">
-        ➕ 添加账号
-      </n-button>
+      <div class="flex gap-2">
+        <n-button :loading="refreshingAll" :disabled="accounts.length === 0" @click="refreshAllAccounts">
+          🔄 一键刷新全部
+        </n-button>
+        <n-button type="primary" @click="showAddDialog = true">
+          ➕ 添加账号
+        </n-button>
+      </div>
     </div>
 
     <!-- 账号列表 -->
@@ -100,6 +105,7 @@ const accounts = ref<Account[]>([]);
 const showAddDialog = ref(false);
 const selectedPlatform = ref<string>('');
 const addingAccount = ref(false);
+const refreshingAll = ref(false);
 
 // 监听对话框打开，重置状态
 watch(showAddDialog, (newVal) => {
@@ -279,6 +285,53 @@ async function refreshAccount(account: Account) {
     loadingMsg.destroy();
     console.error('Failed to refresh account:', error);
     message.error('刷新失败: ' + error.message);
+  }
+}
+
+async function refreshAllAccounts() {
+  if (accounts.value.length === 0) {
+    message.warning('暂无账号需要刷新');
+    return;
+  }
+  
+  refreshingAll.value = true;
+  const loadingMsg = message.loading(`正在刷新 ${accounts.value.length} 个账号...`, { duration: 0 });
+  
+  let successCount = 0;
+  let failCount = 0;
+  
+  try {
+    for (const account of accounts.value) {
+      try {
+        const result = await chrome.runtime.sendMessage({
+          type: 'REFRESH_ACCOUNT',
+          data: { account },
+        });
+        if (result.success) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      } catch (e) {
+        failCount++;
+      }
+    }
+    
+    loadingMsg.destroy();
+    
+    if (failCount === 0) {
+      message.success(`全部 ${successCount} 个账号刷新成功`);
+    } else {
+      message.warning(`刷新完成：${successCount} 成功，${failCount} 失败`);
+    }
+    
+    await loadAccounts();
+  } catch (error: any) {
+    loadingMsg.destroy();
+    console.error('Failed to refresh all accounts:', error);
+    message.error('刷新失败: ' + error.message);
+  } finally {
+    refreshingAll.value = false;
   }
 }
 
