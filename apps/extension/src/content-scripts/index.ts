@@ -112,7 +112,11 @@ function extractLatexFromKatexNode(node: Element, serializer: XMLSerializer): st
   }
   
   // 方法2：CSDN 特殊处理 - 文本格式为 "渲染文本 + LaTeX + 渲染文本"
-  const text = mathml.textContent || '';
+  const rawText = mathml.textContent || '';
+  if (!rawText) return '';
+  
+  // 清理空白字符（换行、多余空格等）
+  const text = rawText.replace(/\s+/g, '').trim();
   if (!text) return '';
   
   // 查找包含反斜杠的 LaTeX 部分
@@ -122,7 +126,7 @@ function extractLatexFromKatexNode(node: Element, serializer: XMLSerializer): st
     let start = firstBackslash;
     for (let i = firstBackslash - 1; i >= 0; i--) {
       const char = text[i];
-      if (/[a-zA-Z0-9_^{}()\[\]=+\-*/<>.,;:!? ]/.test(char)) {
+      if (/[a-zA-Z0-9_^{}()\[\]=+\-*/<>.,;:!?']/.test(char)) {
         start = i;
       } else {
         break;
@@ -155,6 +159,36 @@ function extractLatexFromKatexNode(node: Element, serializer: XMLSerializer): st
         return simple;
       }
     }
+  }
+  
+  // 方法4：简单公式（无反斜杠），格式为 "渲染文本 + LaTeX"
+  // 例如 "dd" -> "d", "xx" -> "x"
+  const len = text.length;
+  if (len >= 2 && len % 2 === 0) {
+    const half = len / 2;
+    const firstHalf = text.substring(0, half);
+    const secondHalf = text.substring(half);
+    if (firstHalf === secondHalf) {
+      return secondHalf;
+    }
+  }
+  
+  // 方法5：三段式格式 "渲染1 + LaTeX + 渲染2"
+  if (len >= 3) {
+    for (let prefixLen = 1; prefixLen < len / 2; prefixLen++) {
+      const prefix = text.substring(0, prefixLen);
+      if (text.endsWith(prefix)) {
+        const middle = text.substring(prefixLen, len - prefixLen);
+        if (middle && middle.length > 0) {
+          return middle;
+        }
+      }
+    }
+  }
+  
+  // 方法6：短文本可能是简单变量
+  if (len <= 3 && /^[a-zA-Z0-9\u0391-\u03C9]+$/.test(text)) {
+    return len >= 2 ? text.substring(Math.floor(len / 2)) : text;
   }
   
   return '';

@@ -31,7 +31,8 @@
         <div
           v-for="post in paginatedPosts"
           :key="post.id"
-          class="flex items-center gap-4 p-4 border rounded-lg hover:bg-gray-50"
+          class="flex items-center gap-4 p-4 border rounded-lg transition-colors"
+          :class="isDark ? 'border-gray-600 hover:bg-gray-700/50' : 'border-gray-200 hover:bg-gray-50'"
         >
           <n-checkbox :checked="selectedIds.includes(post.id)" @update:checked="toggleSelect(post.id)" />
           <div class="flex-1 min-w-0">

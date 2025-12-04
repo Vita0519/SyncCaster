@@ -20,16 +20,23 @@
       </div>
     </div>
 
-    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+    <div 
+      class="rounded-lg shadow-sm border p-6 transition-colors"
+      :class="isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'"
+    >
       <!-- 工具栏 -->
       <div class="flex items-center justify-between mb-4">
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" v-model="selectAll" @change="toggleSelectAll" class="w-4 h-4" />
-          <span class="text-sm">全选</span>
+          <span class="text-sm" :class="isDark ? 'text-gray-300' : 'text-gray-700'">全选</span>
         </label>
         <div class="flex items-center gap-2">
-          <span class="text-sm text-gray-500">每页显示:</span>
-          <select v-model="pageSize" class="border rounded px-2 py-1 text-sm">
+          <span class="text-sm" :class="isDark ? 'text-gray-400' : 'text-gray-500'">每页显示:</span>
+          <select 
+            v-model="pageSize" 
+            class="border rounded px-2 py-1 text-sm transition-colors"
+            :class="isDark ? 'bg-gray-700 border-gray-600 text-gray-200' : 'bg-white border-gray-300 text-gray-700'"
+          >
             <option :value="10">10 条</option>
             <option :value="20">20 条</option>
             <option :value="50">50 条</option>
@@ -38,7 +45,7 @@
       </div>
 
       <!-- 任务列表 -->
-      <div v-if="allJobs.length === 0" class="text-center py-12 text-gray-500">
+      <div v-if="allJobs.length === 0" class="text-center py-12" :class="isDark ? 'text-gray-400' : 'text-gray-500'">
         <div class="text-5xl mb-4">📋</div>
         <div class="text-lg">暂无任务</div>
       </div>
@@ -48,7 +55,7 @@
           v-for="job in paginatedJobs"
           :key="job.id"
           class="border rounded-lg p-4 hover:shadow-md transition-shadow"
-          :class="getJobClass(job.state)"
+          :class="getJobClass(job.state, isDark)"
         >
           <div class="flex items-start gap-4">
             <input
@@ -60,7 +67,7 @@
             <div class="flex-1">
               <div class="flex items-center justify-between mb-2">
                 <div>
-                  <span class="font-semibold text-gray-800">{{ getPostTitle(job.postId) }}</span>
+                  <span class="font-semibold" :class="isDark ? 'text-gray-100' : 'text-gray-800'">{{ getPostTitle(job.postId) }}</span>
                   <span class="ml-2 px-2 py-1 text-xs rounded-full" :class="getStateClass(job.state)">
                     {{ getStateLabel(job.state) }}
                   </span>
@@ -70,14 +77,14 @@
                   <button @click="deleteJob(job.id)" class="px-3 py-1 text-sm bg-red-600 text-white rounded hover:bg-red-700">删除</button>
                 </div>
               </div>
-              <div class="text-sm text-gray-600">发布到 {{ job.targets?.length || 0 }} 个平台</div>
-              <div class="text-xs text-gray-500 mt-1">{{ formatTime(job.createdAt) }}</div>
+              <div class="text-sm" :class="isDark ? 'text-gray-400' : 'text-gray-600'">发布到 {{ job.targets?.length || 0 }} 个平台</div>
+              <div class="text-xs mt-1" :class="isDark ? 'text-gray-500' : 'text-gray-500'">{{ formatTime(job.createdAt) }}</div>
               <div v-if="job.state === 'RUNNING'" class="mt-2">
-                <div class="w-full bg-gray-200 rounded-full h-2">
+                <div class="w-full rounded-full h-2" :class="isDark ? 'bg-gray-600' : 'bg-gray-200'">
                   <div class="bg-blue-600 h-2 rounded-full" :style="{ width: `${job.progress || 0}%` }"></div>
                 </div>
               </div>
-              <div v-if="job.state === 'FAILED' && job.error" class="mt-2 p-2 bg-red-100 rounded text-sm text-red-800">❌ {{ job.error }}</div>
+              <div v-if="job.state === 'FAILED' && job.error" class="mt-2 p-2 rounded text-sm" :class="isDark ? 'bg-red-900/50 text-red-300' : 'bg-red-100 text-red-800'">❌ {{ job.error }}</div>
             </div>
           </div>
         </div>
@@ -85,9 +92,19 @@
 
       <!-- 分页 -->
       <div v-if="allJobs.length > pageSize" class="flex justify-center items-center gap-4 mt-4">
-        <button :disabled="currentPage <= 1" @click="currentPage--" class="px-3 py-1 border rounded disabled:opacity-50">上一页</button>
-        <span class="text-sm">{{ currentPage }} / {{ pageCount }}</span>
-        <button :disabled="currentPage >= pageCount" @click="currentPage++" class="px-3 py-1 border rounded disabled:opacity-50">下一页</button>
+        <button 
+          :disabled="currentPage <= 1" 
+          @click="currentPage--" 
+          class="px-3 py-1 border rounded disabled:opacity-50 transition-colors"
+          :class="isDark ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-300 text-gray-700 hover:bg-gray-100'"
+        >上一页</button>
+        <span class="text-sm" :class="isDark ? 'text-gray-300' : 'text-gray-700'">{{ currentPage }} / {{ pageCount }}</span>
+        <button 
+          :disabled="currentPage >= pageCount" 
+          @click="currentPage++" 
+          class="px-3 py-1 border rounded disabled:opacity-50 transition-colors"
+          :class="isDark ? 'border-gray-600 text-gray-300 hover:bg-gray-700' : 'border-gray-300 text-gray-700 hover:bg-gray-100'"
+        >下一页</button>
       </div>
     </div>
   </div>
@@ -169,7 +186,10 @@ async function deleteSelected() {
 
 function getPostTitle(postId: string) { return posts.value.get(postId)?.title || '未命名文章'; }
 function getStateLabel(state: string) { return { PENDING: '待执行', RUNNING: '进行中', DONE: '已完成', FAILED: '失败' }[state] || state; }
-function getJobClass(state: string) {
+function getJobClass(state: string, dark?: boolean) {
+  if (dark) {
+    return { RUNNING: 'border-blue-500 bg-blue-900/30', DONE: 'border-green-500 bg-green-900/30', PENDING: 'border-yellow-500 bg-yellow-900/30', FAILED: 'border-red-500 bg-red-900/30' }[state] || 'border-gray-600';
+  }
   return { RUNNING: 'border-blue-500 bg-blue-50', DONE: 'border-green-500 bg-green-50', PENDING: 'border-yellow-500 bg-yellow-50', FAILED: 'border-red-500 bg-red-50' }[state] || '';
 }
 function getStateClass(state: string) {

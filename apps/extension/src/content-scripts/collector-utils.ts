@@ -81,6 +81,17 @@ function extractKatexTex(node: Element): string | null {
       return tex;
     }
     console.log('[math] No annotation found in innerHTML');
+    
+    // 方法1.5：CSDN 特殊处理 - 从 textContent 提取
+    // CSDN 的 .katex-mathml 格式为 "渲染文本 + LaTeX" 或 "渲染文本 + LaTeX + 渲染文本"
+    const text = mathml.textContent || '';
+    if (text) {
+      const tex = extractLatexFromCsdnText(text);
+      if (tex) {
+        console.log('[math] Extracted LaTeX from CSDN text:', tex);
+        return tex;
+      }
+    }
   } else {
     console.log('[math] No .katex-mathml found');
   }
@@ -106,6 +117,89 @@ function extractKatexTex(node: Element): string | null {
   }
   
   console.log('[math] No LaTeX found in node:', node.className);
+  return null;
+}
+
+/**
+ * 从 CSDN 的 katex-mathml textContent 提取 LaTeX
+ * CSDN 格式：
+ * - 简单公式（如 d）: "dd" -> 前半是渲染文本，后半是 LaTeX
+ * - 复杂公式: "渲染文本 + LaTeX + 渲染文本"，LaTeX 包含反斜杠命令
+ */
+function extractLatexFromCsdnText(rawText: string): string | null {
+  if (!rawText || rawText.length === 0) return null;
+  
+  // 清理空白字符（换行、多余空格等）
+  const text = rawText.replace(/\s+/g, '').trim();
+  if (!text) return null;
+  
+  console.log('[math] CSDN text after cleanup:', text, 'len:', text.length);
+  
+  // 情况1：包含反斜杠的复杂公式
+  if (text.includes('\\')) {
+    // 找到第一个反斜杠位置
+    const firstBackslash = text.indexOf('\\');
+    // 找到最后一个 LaTeX 命令结束位置
+    const lastCmdMatch = text.match(/\\[a-zA-Z]+[^\\]*$/);
+    if (lastCmdMatch) {
+      const lastCmdStart = text.lastIndexOf(lastCmdMatch[0]);
+      const lastCmdEnd = lastCmdStart + lastCmdMatch[0].length;
+      
+      // 向前扩展以包含可能的前缀（如 d_{...}）
+      let start = firstBackslash;
+      for (let i = firstBackslash - 1; i >= 0; i--) {
+        const char = text[i];
+        // 允许字母、数字、下划线、上标、括号等 LaTeX 字符
+        if (/[a-zA-Z0-9_^{}()\[\]=+\-*/<>.,;:!?']/.test(char)) {
+          start = i;
+        } else {
+          break;
+        }
+      }
+      
+      const extracted = text.substring(start, lastCmdEnd).trim();
+      if (extracted && /\\[a-zA-Z]+/.test(extracted)) {
+        return extracted;
+      }
+    }
+  }
+  
+  // 情况2：简单公式（无反斜杠），格式为 "渲染文本 + LaTeX"
+  // 例如 "dd" -> "d", "xx" -> "x", "αα" -> "α"
+  const len = text.length;
+  if (len >= 2 && len % 2 === 0) {
+    const half = len / 2;
+    const firstHalf = text.substring(0, half);
+    const secondHalf = text.substring(half);
+    if (firstHalf === secondHalf) {
+      console.log('[math] Simple formula detected (repeated text):', secondHalf);
+      return secondHalf;
+    }
+  }
+  
+  // 情况3：三段式格式 "渲染1 + LaTeX + 渲染2"，其中渲染1 ≈ 渲染2
+  // 尝试找到重复的前后缀
+  if (len >= 3) {
+    for (let prefixLen = 1; prefixLen < len / 2; prefixLen++) {
+      const prefix = text.substring(0, prefixLen);
+      if (text.endsWith(prefix)) {
+        const middle = text.substring(prefixLen, len - prefixLen);
+        if (middle && middle.length > 0) {
+          console.log('[math] Three-part formula detected, middle:', middle);
+          return middle;
+        }
+      }
+    }
+  }
+  
+  // 情况4：如果文本很短（<=3字符），可能就是简单变量
+  if (len <= 3 && /^[a-zA-Z0-9\u0391-\u03C9]+$/.test(text)) {
+    // 取后半部分或最后一个字符
+    const result = len >= 2 ? text.substring(Math.floor(len / 2)) : text;
+    console.log('[math] Short formula detected:', result);
+    return result;
+  }
+  
   return null;
 }
 
