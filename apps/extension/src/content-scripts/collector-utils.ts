@@ -56,60 +56,129 @@ export function computeMetrics(html: string): ContentMetrics {
 /**
  * 从 KaTeX 节点提取原始 LaTeX
  * 关键：MathML 元素在不同命名空间，querySelector 可能无法匹配
- * 解决方案：直接从 innerHTML 用正则提取 annotation 内容
+ * 解决方案：使用 XMLSerializer 序列化原始 MathML，保留 annotation 标签
  */
 function extractKatexTex(node: Element): string | null {
-  // 方法1：尝试从 .katex-mathml 的 innerHTML 中用正则提取
   const mathml = node.querySelector('.katex-mathml');
-  if (mathml) {
-    const html = mathml.innerHTML;
-    console.log('[math] .katex-mathml innerHTML length:', html.length);
-    console.log('[math] .katex-mathml innerHTML preview:', html.substring(0, 200));
-    
-    // 匹配 <annotation encoding="application/x-tex">...</annotation>
-    const match = html.match(/<annotation[^>]*encoding=["']application\/x-tex["'][^>]*>([\s\S]*?)<\/annotation>/i);
-    if (match && match[1]) {
-      const tex = decodeHtmlEntities(match[1].trim());
-      console.log('[math] Extracted LaTeX via regex:', tex.substring(0, 50));
-      return tex;
-    }
-    // 备用：匹配任何 annotation 标签
-    const match2 = html.match(/<annotation[^>]*>([\s\S]*?)<\/annotation>/i);
-    if (match2 && match2[1]) {
-      const tex = decodeHtmlEntities(match2[1].trim());
-      console.log('[math] Extracted LaTeX via fallback regex:', tex.substring(0, 50));
-      return tex;
-    }
-    console.log('[math] No annotation found in innerHTML');
-    
-    // 方法1.5：CSDN 特殊处理 - 从 textContent 提取
-    // CSDN 的 .katex-mathml 格式为 "渲染文本 + LaTeX" 或 "渲染文本 + LaTeX + 渲染文本"
-    const text = mathml.textContent || '';
-    if (text) {
-      const tex = extractLatexFromCsdnText(text);
-      if (tex) {
-        console.log('[math] Extracted LaTeX from CSDN text:', tex);
-        return tex;
-      }
-    }
-  } else {
+  if (!mathml) {
     console.log('[math] No .katex-mathml found');
+    return null;
   }
   
-  // 方法2：尝试 querySelector（可能在某些浏览器工作）
-  const selectors = [
+  // 核心方法：使用 XMLSerializer 序列化原始 MathML
+  // 这是最可靠的方法，因为 innerHTML/outerHTML 可能会丢失 MathML 命名空间内容
+  try {
+    const serializer = new XMLSerializer();
+    const serialized = serializer.serializeToString(mathml);
+    console.log('[math] Serialized MathML length:', serialized.length);
+    
+    // 调试：打印序列化内容的一部分，帮助分析格式
+    if (serialized.length < 500) {
+      console.log('[math] Serialized MathML:', serialized);
+    } else {
+      console.log('[math] Serialized MathML (first 300):', serialized.substring(0, 300));
+      // 检查是否包含 annotation
+      const annotationIdx = serialized.toLowerCase().indexOf('annotation');
+      if (annotationIdx >= 0) {
+        console.log('[math] Found annotation at:', annotationIdx, serialized.substring(annotationIdx, annotationIdx + 200));
+      } else {
+        console.log('[math] No annotation tag found in serialized MathML');
+      }
+    }
+    
+    // 从序列化的 XML 中提取 annotation（支持多种格式）
+    // 格式1: <annotation encoding="application/x-tex">...</annotation>
+    // 格式2: <m:annotation encoding="application/x-tex">...</m:annotation>
+    // 格式3: <annotation>...</annotation> (无 encoding)
+    // 格式4: <semantics>...<annotation>...</annotation></semantics>
+    
+    const annotationPatterns = [
+      // 带命名空间前缀和 encoding
+      /<(?:m:|math:)?annotation[^>]*encoding=["']application\/x-tex["'][^>]*>([\s\S]*?)<\/(?:m:|math:)?annotation>/i,
+      // 不带命名空间但有 encoding
+      /<annotation[^>]*encoding=["'][^"']*tex[^"']*["'][^>]*>([\s\S]*?)<\/annotation>/i,
+      // 任何 annotation 标签
+      /<(?:m:|math:)?annotation[^>]*>([\s\S]*?)<\/(?:m:|math:)?annotation>/i,
+    ];
+    
+    for (const pattern of annotationPatterns) {
+      const match = serialized.match(pattern);
+      if (match && match[1]) {
+        const tex = decodeHtmlEntities(match[1].trim());
+        // 验证提取的内容看起来像 LaTeX
+        if (tex && tex.length > 0 && /[a-zA-Z\\{}_^=]/.test(tex)) {
+          console.log('[math] Found LaTeX via XMLSerializer pattern:', tex.substring(0, 80));
+          return tex;
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[math] XMLSerializer failed:', e);
+  }
+  
+  // 方法2：直接用 querySelector 获取 annotation
+  const annotationSelectors = [
     'annotation[encoding="application/x-tex"]',
     'annotation',
   ];
-  for (const sel of selectors) {
-    const el = node.querySelector(sel);
-    if (el && el.textContent && el.textContent.trim()) {
-      console.log('[math] Found LaTeX via querySelector:', sel);
-      return el.textContent.trim();
+  
+  for (const sel of annotationSelectors) {
+    try {
+      const annotation = mathml.querySelector(sel);
+      if (annotation && annotation.textContent) {
+        const tex = annotation.textContent.trim();
+        if (tex && tex.length > 0) {
+          console.log('[math] Found LaTeX via querySelector:', sel, tex.substring(0, 80));
+          return tex;
+        }
+      }
+    } catch (e) {
+      // 选择器可能不支持
     }
   }
   
-  // 方法3：从 data 属性提取
+  // 方法3：从 outerHTML 用正则提取
+  const outerHtml = mathml.outerHTML || '';
+  if (outerHtml) {
+    const match = outerHtml.match(/<annotation[^>]*encoding=["']application\/x-tex["'][^>]*>([\s\S]*?)<\/annotation>/i);
+    if (match && match[1]) {
+      const tex = decodeHtmlEntities(match[1].trim());
+      console.log('[math] Found LaTeX via outerHTML:', tex.substring(0, 80));
+      return tex;
+    }
+  }
+  
+  // 方法4：遍历所有子元素查找 annotation（处理命名空间问题）
+  const allElements = mathml.getElementsByTagName('*');
+  for (let i = 0; i < allElements.length; i++) {
+    const el = allElements[i];
+    if (el.localName === 'annotation' || el.tagName.toLowerCase().endsWith(':annotation')) {
+      const encoding = el.getAttribute('encoding') || '';
+      if (encoding.includes('tex') || !encoding) {
+        const tex = el.textContent?.trim();
+        if (tex && tex.length > 0 && /[a-zA-Z\\{}_^]/.test(tex)) {
+          console.log('[math] Found LaTeX via getElementsByTagName:', tex.substring(0, 80));
+          return tex;
+        }
+      }
+    }
+  }
+  
+  console.log('[math] No annotation found, falling back to textContent extraction');
+  
+  // 方法5：从 textContent 提取（最后手段）
+  // KaTeX 的 textContent 格式：渲染文本 + LaTeX 文本（拼接在一起）
+  const text = mathml.textContent || '';
+  console.log('[math] textContent fallback:', text.substring(0, 100));
+  if (text) {
+    const tex = extractLatexFromCsdnText(text);
+    if (tex) {
+      console.log('[math] Extracted LaTeX (special char):', tex.substring(0, 80));
+      return tex;
+    }
+  }
+  
+  // 方法6：从 data 属性提取
   const dataTex = node.getAttribute('data-tex') || node.getAttribute('data-latex');
   if (dataTex && dataTex.trim()) {
     console.log('[math] Found LaTeX via data attr');
@@ -122,9 +191,17 @@ function extractKatexTex(node: Element): string | null {
 
 /**
  * 从 CSDN 的 katex-mathml textContent 提取 LaTeX
- * CSDN 格式：
- * - 简单公式（如 d）: "dd" -> 前半是渲染文本，后半是 LaTeX
- * - 复杂公式: "渲染文本 + LaTeX + 渲染文本"，LaTeX 包含反斜杠命令
+ * 
+ * KaTeX 的 textContent 格式分析：
+ * - MathML 部分：渲染后的可读文本（如 "E=mc2", "dDetectGPT(x)=..."）
+ * - annotation 部分：原始 LaTeX（如 "E=mc^2", "d_{\text{DetectGPT}}..."）
+ * - 合并后：渲染文本 + LaTeX 文本（两者拼接在一起）
+ * 
+ * 核心策略：
+ * 1. 对于简单公式（如 E=mc^2）：textContent = "E=mc2E=mc^2"
+ *    - 前半部分是渲染文本（无特殊字符）
+ *    - 后半部分是 LaTeX（有 ^ _ {} \ 等特殊字符）
+ * 2. 关键：找到 LaTeX 的起始位置，而不是只找第一个特殊字符
  */
 function extractLatexFromCsdnText(rawText: string): string | null {
   if (!rawText || rawText.length === 0) return null;
@@ -135,38 +212,10 @@ function extractLatexFromCsdnText(rawText: string): string | null {
   
   console.log('[math] CSDN text after cleanup:', text, 'len:', text.length);
   
-  // 情况1：包含反斜杠的复杂公式
-  if (text.includes('\\')) {
-    // 找到第一个反斜杠位置
-    const firstBackslash = text.indexOf('\\');
-    // 找到最后一个 LaTeX 命令结束位置
-    const lastCmdMatch = text.match(/\\[a-zA-Z]+[^\\]*$/);
-    if (lastCmdMatch) {
-      const lastCmdStart = text.lastIndexOf(lastCmdMatch[0]);
-      const lastCmdEnd = lastCmdStart + lastCmdMatch[0].length;
-      
-      // 向前扩展以包含可能的前缀（如 d_{...}）
-      let start = firstBackslash;
-      for (let i = firstBackslash - 1; i >= 0; i--) {
-        const char = text[i];
-        // 允许字母、数字、下划线、上标、括号等 LaTeX 字符
-        if (/[a-zA-Z0-9_^{}()\[\]=+\-*/<>.,;:!?']/.test(char)) {
-          start = i;
-        } else {
-          break;
-        }
-      }
-      
-      const extracted = text.substring(start, lastCmdEnd).trim();
-      if (extracted && /\\[a-zA-Z]+/.test(extracted)) {
-        return extracted;
-      }
-    }
-  }
-  
-  // 情况2：简单公式（无反斜杠），格式为 "渲染文本 + LaTeX"
-  // 例如 "dd" -> "d", "xx" -> "x", "αα" -> "α"
   const len = text.length;
+  
+  // 情况1：简单公式（无特殊字符），格式为 "渲染文本 + LaTeX"（完全重复）
+  // 例如 "dd" -> "d", "xx" -> "x", "αα" -> "α"
   if (len >= 2 && len % 2 === 0) {
     const half = len / 2;
     const firstHalf = text.substring(0, half);
@@ -177,8 +226,161 @@ function extractLatexFromCsdnText(rawText: string): string | null {
     }
   }
   
-  // 情况3：三段式格式 "渲染1 + LaTeX + 渲染2"，其中渲染1 ≈ 渲染2
-  // 尝试找到重复的前后缀
+  // 情况2：包含 LaTeX 特殊字符的公式
+  // 策略：找到渲染文本和 LaTeX 的分界点
+  // 渲染文本不包含 LaTeX 特殊字符（_ { } ^ \），LaTeX 包含这些字符
+  const latexSpecialChars = /[_{}\\^]/;
+  
+  // 找到第一个 LaTeX 特殊字符的位置
+  let firstSpecialIdx = -1;
+  for (let i = 0; i < text.length; i++) {
+    if (latexSpecialChars.test(text[i])) {
+      firstSpecialIdx = i;
+      break;
+    }
+  }
+  
+  console.log('[math] firstSpecialIdx:', firstSpecialIdx, 'char:', text[firstSpecialIdx]);
+  
+  if (firstSpecialIdx > 0) {
+    // 渲染文本在特殊字符之前
+    // 但 LaTeX 的起始位置可能在特殊字符之前（因为 LaTeX 开头可能是普通字符）
+    // 
+    // 例如：textContent = "E=mc2E=mc^2"
+    // - 渲染文本 = "E=mc2"
+    // - LaTeX = "E=mc^2"
+    // - firstSpecialIdx 指向 ^，但 LaTeX 从第二个 E 开始
+    //
+    // 新策略：从文本开头的字符开始，在 firstSpecialIdx 之前找到它的最后一次出现
+    // 这个位置就是 LaTeX 的起始位置
+    
+    const startChar = text[0];
+    let latexStart = -1;
+    
+    // 从 firstSpecialIdx 向前搜索，找到 startChar 的最后一次出现
+    for (let i = firstSpecialIdx - 1; i > 0; i--) {
+      if (text[i] === startChar) {
+        // 验证：从这个位置开始的子串应该包含特殊字符
+        const candidate = text.substring(i);
+        if (latexSpecialChars.test(candidate)) {
+          latexStart = i;
+          console.log('[math] Found LaTeX start via startChar search:', latexStart);
+          break;
+        }
+      }
+    }
+    
+    // 如果没找到，尝试更复杂的前缀匹配
+    if (latexStart < 0) {
+      const beforeSpecial = text.substring(0, firstSpecialIdx);
+      
+      // 尝试不同长度的渲染前缀，找到在 beforeSpecial 中重复出现的最长前缀
+      for (let prefixLen = Math.min(beforeSpecial.length - 1, 20); prefixLen >= 1; prefixLen--) {
+        const prefix = beforeSpecial.substring(0, prefixLen);
+        // 在 beforeSpecial 中查找 prefix 的第二次出现（从位置 prefixLen 开始搜索避免重叠）
+        const secondOccurrence = beforeSpecial.indexOf(prefix, prefixLen);
+        if (secondOccurrence > 0) {
+          const candidate = text.substring(secondOccurrence);
+          if (latexSpecialChars.test(candidate)) {
+            latexStart = secondOccurrence;
+            console.log('[math] Found LaTeX start via prefix match:', latexStart, 'prefix:', prefix);
+            break;
+          }
+        }
+      }
+    }
+    
+    // 如果没找到重复前缀，使用备用策略
+    if (latexStart < 0) {
+      // 备用策略1：假设渲染文本和 LaTeX 长度相近
+      // 在 firstSpecialIdx 附近寻找分界点
+      const estimatedHalf = Math.floor(len / 2);
+      
+      // 在估计的中点附近搜索
+      for (let offset = 0; offset <= Math.min(10, estimatedHalf); offset++) {
+        for (const delta of [0, -offset, offset]) {
+          const candidateStart = estimatedHalf + delta;
+          if (candidateStart > 0 && candidateStart < firstSpecialIdx) {
+            const candidateLatex = text.substring(candidateStart);
+            const renderText = text.substring(0, candidateStart);
+            
+            // 验证：LaTeX 应该以渲染文本的开头字符开始
+            if (candidateLatex.length > 0 && renderText.length > 0) {
+              // 检查开头是否匹配（至少 1-3 个字符）
+              const matchLen = Math.min(3, renderText.length, candidateLatex.length);
+              if (renderText.substring(0, matchLen) === candidateLatex.substring(0, matchLen)) {
+                latexStart = candidateStart;
+                console.log('[math] Found LaTeX start via half-point search:', latexStart);
+                break;
+              }
+            }
+          }
+        }
+        if (latexStart >= 0) break;
+      }
+    }
+    
+    // 如果还是没找到，使用最后的备用策略
+    if (latexStart < 0) {
+      // 备用策略2：从第一个特殊字符向前扩展，找到合理的起始位置
+      // 对于 "E=mc2E=mc^2"，从 ^ 向前找到第二个 E
+      latexStart = firstSpecialIdx;
+      
+      // 向前扩展直到找到与开头相同的字符序列
+      const startChar = text[0];
+      for (let i = firstSpecialIdx - 1; i > 0; i--) {
+        if (text[i] === startChar) {
+          // 验证从这里开始是否合理
+          const candidateLatex = text.substring(i);
+          if (latexSpecialChars.test(candidateLatex)) {
+            latexStart = i;
+            console.log('[math] Found LaTeX start via startChar match:', latexStart);
+            break;
+          }
+        }
+      }
+    }
+    
+    if (latexStart > 0) {
+      const latex = text.substring(latexStart);
+      console.log('[math] Extracted LaTeX (improved method):', latex.substring(0, 80));
+      return latex;
+    }
+  }
+  
+  // 情况3：只有反斜杠命令，没有 _ { } ^
+  if (text.includes('\\')) {
+    const firstBackslash = text.indexOf('\\');
+    
+    // 类似的策略：找到 LaTeX 的起始位置
+    const beforeBackslash = text.substring(0, firstBackslash);
+    let latexStart = firstBackslash;
+    
+    // 尝试找到渲染文本的重复
+    const startChar = text[0];
+    for (let i = firstBackslash - 1; i > 0; i--) {
+      if (text[i] === startChar) {
+        latexStart = i;
+        break;
+      }
+    }
+    
+    // 如果没找到，尝试半分
+    if (latexStart === firstBackslash && beforeBackslash.length > 2) {
+      const estimatedHalf = Math.floor(len / 2);
+      if (estimatedHalf < firstBackslash) {
+        latexStart = estimatedHalf;
+      }
+    }
+    
+    const latex = text.substring(latexStart);
+    if (latex && /\\[a-zA-Z]+/.test(latex)) {
+      console.log('[math] Extracted LaTeX (backslash method):', latex.substring(0, 80));
+      return latex;
+    }
+  }
+  
+  // 情况4：三段式格式 "渲染1 + LaTeX + 渲染2"，其中渲染1 ≈ 渲染2
   if (len >= 3) {
     for (let prefixLen = 1; prefixLen < len / 2; prefixLen++) {
       const prefix = text.substring(0, prefixLen);
@@ -192,9 +394,8 @@ function extractLatexFromCsdnText(rawText: string): string | null {
     }
   }
   
-  // 情况4：如果文本很短（<=3字符），可能就是简单变量
+  // 情况5：如果文本很短（<=3字符），可能就是简单变量
   if (len <= 3 && /^[a-zA-Z0-9\u0391-\u03C9]+$/.test(text)) {
-    // 取后半部分或最后一个字符
     const result = len >= 2 ? text.substring(Math.floor(len / 2)) : text;
     console.log('[math] Short formula detected:', result);
     return result;
