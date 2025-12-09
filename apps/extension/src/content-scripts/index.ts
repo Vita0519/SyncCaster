@@ -57,7 +57,66 @@ function extractFormulasFromOriginalDom(): Map<string, { tex: string; isDisplay:
   const serializer = new XMLSerializer();
   const processed = new WeakSet<Element>();
   let index = 0;
+  const hostname = window.location.hostname;
+  const isZhihu = hostname.includes('zhihu.com');
   
+  // 知乎专用公式提取
+  if (isZhihu) {
+    // 知乎使用 data-tex 属性存储 LaTeX
+    document.querySelectorAll('[data-tex]').forEach((node) => {
+      if (processed.has(node)) return;
+      processed.add(node);
+      
+      const tex = node.getAttribute('data-tex')?.trim();
+      if (tex) {
+        const id = 'formula-' + (index++);
+        (node as HTMLElement).setAttribute('data-formula-id', id);
+        // 知乎的块级公式通常在 figure 或 p 标签内，或者有 display 类
+        const isDisplay = !!node.closest('figure') || 
+                          node.classList.contains('ztext-math') ||
+                          node.tagName === 'IMG';
+        formulaMap.set(id, { tex, isDisplay });
+        console.log('[math:zhihu] Found formula via data-tex:', tex.substring(0, 50), 'display:', isDisplay);
+      }
+    });
+    
+    // 知乎的 ztext-math 公式图片
+    document.querySelectorAll('img.ztext-math, img[data-formula]').forEach((node) => {
+      if (processed.has(node)) return;
+      processed.add(node);
+      
+      const tex = node.getAttribute('data-tex') || 
+                  node.getAttribute('data-formula') ||
+                  node.getAttribute('alt');
+      if (tex && tex.trim()) {
+        const id = 'formula-' + (index++);
+        (node as HTMLElement).setAttribute('data-formula-id', id);
+        const isDisplay = !!node.closest('figure');
+        formulaMap.set(id, { tex: tex.trim(), isDisplay });
+        console.log('[math:zhihu] Found formula via img:', tex.substring(0, 50));
+      }
+    });
+    
+    // 知乎的 MathJax 渲染（如果有）
+    document.querySelectorAll('.MathJax, .MathJax_Display, mjx-container').forEach((node) => {
+      if (processed.has(node)) return;
+      processed.add(node);
+      
+      const tex = node.getAttribute('data-tex') || 
+                  node.getAttribute('data-latex') ||
+                  extractMathJaxAnnotation(node);
+      if (tex && tex.trim()) {
+        const id = 'formula-' + (index++);
+        (node as HTMLElement).setAttribute('data-formula-id', id);
+        const isDisplay = node.classList.contains('MathJax_Display') || 
+                          node.hasAttribute('display');
+        formulaMap.set(id, { tex: tex.trim(), isDisplay });
+        console.log('[math:zhihu] Found MathJax formula:', tex.substring(0, 50));
+      }
+    });
+  }
+  
+  // CSDN 和通用 KaTeX 处理
   // 处理块级公式
   document.querySelectorAll('.katex-display, .katex--display').forEach((node) => {
     if (processed.has(node)) return;
@@ -87,6 +146,8 @@ function extractFormulasFromOriginalDom(): Map<string, { tex: string; isDisplay:
   
   // 处理 MathJax script
   document.querySelectorAll('script[type*="math/tex"]').forEach((script) => {
+    if (processed.has(script)) return;
+    processed.add(script);
     const tex = script.textContent?.trim();
     if (tex) {
       const type = script.getAttribute('type') || '';
@@ -98,6 +159,53 @@ function extractFormulasFromOriginalDom(): Map<string, { tex: string; isDisplay:
   });
   
   return formulaMap;
+}
+
+// 从 MathJax 节点提取 annotation
+function extractMathJaxAnnotation(node: Element): string {
+  const annotation = node.querySelector('annotation[encoding*="tex"]');
+  if (annotation?.textContent) return annotation.textContent.trim();
+  
+  // 尝试从 outerHTML 提取
+  const html = node.outerHTML || '';
+  const match = html.match(/<annotation[^>]*encoding=["'][^"']*tex[^"']*["'][^>]*>([\s\S]*?)<\/annotation>/i);
+  if (match?.[1]) return match[1].trim();
+  
+  return '';
+}
+
+/**
+ * 修复知乎列表结构
+ * 知乎的列表可能有非标准的嵌套结构，需要修复以确保正确转换为 Markdown
+ */
+function fixZhihuListStructure(container: HTMLElement): void {
+  // 知乎可能将嵌套列表放在 li 外面，需要修复
+  container.querySelectorAll('ul, ol').forEach((list) => {
+    const items = list.querySelectorAll(':scope > li');
+    items.forEach((li) => {
+      // 检查 li 后面是否紧跟着一个 ul/ol（应该在 li 内部）
+      const nextSibling = li.nextElementSibling;
+      if (nextSibling && (nextSibling.tagName === 'UL' || nextSibling.tagName === 'OL')) {
+        // 检查这个嵌套列表是否应该属于当前 li
+        // 如果嵌套列表的缩进更深，则移动到 li 内部
+        const nestedList = nextSibling;
+        // 将嵌套列表移动到 li 内部
+        li.appendChild(nestedList);
+        console.log('[zhihu] Fixed nested list structure');
+      }
+    });
+  });
+  
+  // 确保所有 li 都在 ul/ol 内
+  container.querySelectorAll('li').forEach((li) => {
+    if (li.parentElement && !['UL', 'OL'].includes(li.parentElement.tagName)) {
+      // li 不在列表内，创建一个 ul 包裹它
+      const ul = document.createElement('ul');
+      li.parentElement.insertBefore(ul, li);
+      ul.appendChild(li);
+      console.log('[zhihu] Wrapped orphan li in ul');
+    }
+  });
 }
 
 function extractLatexFromKatexNode(node: Element, _serializer: XMLSerializer): string {
@@ -431,6 +539,25 @@ async function collectContent() {
       // 知乎清理
       if (hostname.includes('zhihu.com')) {
         container.querySelectorAll('.RichContent-actions, .ContentItem-actions').forEach(el => el.remove());
+        
+        // 知乎列表层级修复：知乎的嵌套列表结构可能不标准
+        // 确保嵌套的 ul/ol 在 li 内部
+        fixZhihuListStructure(container);
+        
+        // 知乎公式图片替换为 LaTeX 占位符
+        container.querySelectorAll('img.ztext-math, img[data-tex]').forEach((img) => {
+          const tex = img.getAttribute('data-tex') || img.getAttribute('alt') || '';
+          if (tex) {
+            const isDisplay = !!img.closest('figure');
+            const DS = String.fromCharCode(36);
+            const placeholder = document.createElement('span');
+            placeholder.setAttribute('data-sync-math', 'true');
+            placeholder.setAttribute('data-tex', tex);
+            placeholder.setAttribute('data-display', String(isDisplay));
+            placeholder.textContent = isDisplay ? DS + DS + tex + DS + DS : DS + tex + DS;
+            img.replaceWith(placeholder);
+          }
+        });
       }
       
       // 掘金清理
@@ -559,29 +686,4 @@ async function fillAndPublish(data: { platform: string; payload: unknown }) {
   }
 }
 
-function addFloatingButton() {
-  const button = document.createElement('button');
-  button.textContent = '📤 SyncCaster';
-  button.style.cssText = 'position: fixed; bottom: 20px; right: 20px; z-index: 99999; padding: 12px 20px; background: #1677ff; color: white; border: none; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); cursor: pointer; font-size: 14px;';
-  
-  button.addEventListener('click', async () => {
-    try {
-      button.textContent = '⏳ 采集中...';
-      button.disabled = true;
-      const result = await collectContent();
-      chrome.runtime.sendMessage({ type: 'CONTENT_COLLECTED', data: result });
-      button.textContent = '✅ 已采集';
-      setTimeout(() => { button.textContent = '📤 SyncCaster'; button.disabled = false; }, 2000);
-    } catch {
-      button.textContent = '❌ 失败';
-      button.disabled = false;
-    }
-  });
-  
-  document.body.appendChild(button);
-}
-
 initAuthDetector();
-if (!window.location.href.includes('mp.weixin.qq.com')) {
-  addFloatingButton();
-}

@@ -39,8 +39,7 @@
             <div class="font-medium truncate" :class="isDark ? 'text-gray-100' : 'text-gray-800'">{{ post.title || '未命名文章' }}</div>
             <div class="text-sm" :class="isDark ? 'text-gray-400' : 'text-gray-500'">{{ formatTime(post.updatedAt) }}</div>
           </div>
-          <n-tag v-if="post.url" type="success" size="small">已采集</n-tag>
-          <n-tag v-else type="info" size="small">草稿</n-tag>
+          <n-tag :type="getSourceTagType(post)" size="small">{{ getSourceLabel(post) }}</n-tag>
           <div class="flex gap-2">
             <n-button size="small" type="primary" @click="editPost(post.id)">编辑/发布</n-button>
             <n-button size="small" type="error" @click="deletePost(post.id)">删除</n-button>
@@ -120,6 +119,43 @@ function formatTime(ts: number) {
 
 function createPost() { window.location.hash = 'editor/new'; }
 function editPost(id: string) { window.location.hash = `editor/${id}`; }
+
+// 根据 source_url 判断文章来源平台
+function getSourcePlatform(post: any): string {
+  // 优先从 meta.source_url 读取，其次是 canonicalUrl，最后是 source_url
+  const url = post.meta?.source_url || post.canonicalUrl || post.source_url || post.url || '';
+  if (!url) return 'original';
+  if (url.includes('csdn.net') || url.includes('blog.csdn.net')) return 'csdn';
+  if (url.includes('zhihu.com')) return 'zhihu';
+  if (url.includes('juejin.cn')) return 'juejin';
+  if (url.includes('jianshu.com')) return 'jianshu';
+  if (url.includes('segmentfault.com')) return 'segmentfault';
+  if (url.includes('cnblogs.com')) return 'cnblogs';
+  if (url.includes('oschina.net')) return 'oschina';
+  return 'collected'; // 其他采集来源
+}
+
+function getSourceLabel(post: any): string {
+  const platform = getSourcePlatform(post);
+  const labels: Record<string, string> = {
+    csdn: 'CSDN',
+    zhihu: '知乎',
+    juejin: '掘金',
+    jianshu: '简书',
+    segmentfault: 'SegmentFault',
+    cnblogs: '博客园',
+    oschina: '开源中国',
+    collected: '已采集',
+    original: '原创',
+  };
+  return labels[platform] || '原创';
+}
+
+function getSourceTagType(post: any): 'success' | 'info' | 'warning' | 'error' | 'default' {
+  const platform = getSourcePlatform(post);
+  if (platform === 'original') return 'info';
+  return 'success';
+}
 
 async function deletePost(id: string) {
   if (!confirm('确认删除这篇文章吗？')) return;
