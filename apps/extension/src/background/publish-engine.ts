@@ -117,50 +117,19 @@ export async function publishToTarget(
     }
 
     // 处理图片 - 对于 DOM 模式，图片将在发布时一起处理
-    let processedPost = { ...post };
-    const manifest = buildAssetManifest(post);
+    // 注意：部分来源的 Markdown 图片链接会混入空格/换行（例如 `. jpeg`），导致平台/上传无法识别。
+    // 这里先规范化图片语法里的 URL，保证后续提取、上传、替换都基于同一个“干净 URL”。
+    let processedPost = {
+      ...post,
+      body_md: normalizeMarkdownImageUrls(post.body_md || ''),
+    };
+    const manifest = buildAssetManifest(processedPost);
     const strategy = getImageStrategy(target.platform);
     
-    // 对于 DOM 模式 + domPasteUpload 策略，图片将在 fillAndPublish 中处理
-    // 这里只需要下载图片数据，不单独上传
+    // 处理图片：若目标平台不接受外链，需先上传并替换 URL（包括 domPasteUpload 模式）
     let downloadedImages: { url: string; base64: string; mimeType: string }[] = [];
-    
-    if (adapter.kind === 'dom' && strategy?.mode === 'domPasteUpload' && manifest.images.length > 0) {
-      await jobLogger({ 
-        level: 'info', 
-        step: 'upload_images', 
-        message: `发现 ${manifest.images.length} 张图片，将在发布时一起处理` 
-      });
-      
-      // 在 background 中下载图片
-      try {
-        downloadedImages = await downloadImagesInBackground(
-          manifest.images.map(img => img.originalUrl),
-          (progress) => {
-            jobLogger({
-              level: 'info',
-              step: 'upload_images',
-              message: `下载图片: ${progress.completed}/${progress.total}`,
-              meta: { progress },
-            });
-          }
-        );
-        await jobLogger({
-          level: 'info',
-          step: 'upload_images',
-          message: `图片下载完成: ${downloadedImages.length}/${manifest.images.length}`,
-        });
-      } catch (imgError: any) {
-        console.error('[publish-engine] 图片下载失败', imgError);
-        await jobLogger({
-          level: 'warn',
-          step: 'upload_images',
-          message: '图片下载失败，将使用原始链接',
-          meta: { error: imgError?.message },
-        });
-      }
-    } else if (manifest.images.length > 0 && strategy && strategy.mode !== 'externalUrlOnly') {
-      // 非 DOM 模式或非 domPasteUpload，使用原有的单独上传逻辑
+
+    if (manifest.images.length > 0 && strategy && strategy.mode !== 'externalUrlOnly') {
       await jobLogger({ 
         level: 'info', 
         step: 'upload_images', 
@@ -184,8 +153,8 @@ export async function publishToTarget(
         
         if (imageResult.urlMapping.size > 0) {
           processedPost = {
-            ...post,
-            body_md: ImageUploadPipeline.replaceImageUrls(post.body_md || '', imageResult.urlMapping),
+            ...processedPost,
+            body_md: ImageUploadPipeline.replaceImageUrls(processedPost.body_md || '', imageResult.urlMapping),
           };
           await jobLogger({
             level: 'info',
@@ -330,6 +299,62 @@ export async function publishToTarget(
   }
 }
 
+async function fetchImageWithBestEffort(url: string): Promise<Response> {
+  const u = new URL(url);
+  const host = u.hostname.toLowerCase();
+
+  const commonHeaders: Record<string, string> = {
+    Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+  };
+
+  const tryFetch = async (referrer?: string, referrerPolicy?: ReferrerPolicy) => {
+    const init: RequestInit = {
+      method: 'GET',
+      credentials: 'omit',
+      headers: commonHeaders,
+      cache: 'no-store',
+    };
+    if (referrer !== undefined) (init as any).referrer = referrer;
+    if (referrerPolicy !== undefined) init.referrerPolicy = referrerPolicy;
+    return await fetch(url, init);
+  };
+
+  // CSDN 图床通常有防盗链：优先模拟来自 CSDN 博客域名的 Referer
+  const referrerCandidates: Array<{ referrer?: string; policy?: ReferrerPolicy }> = [];
+
+  if (host.endsWith('csdnimg.cn')) {
+    referrerCandidates.push({ referrer: 'https://blog.csdn.net/', policy: 'unsafe-url' });
+    referrerCandidates.push({ referrer: 'https://www.csdn.net/', policy: 'unsafe-url' });
+  }
+
+  // 默认：使用图片自身 origin 的 referrer（部分站点会校验同源/同站 referer）
+  referrerCandidates.push({ referrer: u.origin + '/', policy: 'origin' });
+
+  // 兜底：使用当前目标站点 origin（有些 CDN 仅要求存在可用 referer）
+  referrerCandidates.push({ referrer: 'https://developer.aliyun.com/', policy: 'origin' });
+
+  // 最后：不设置 referrer（浏览器默认策略）
+  referrerCandidates.push({ referrer: undefined, policy: undefined });
+
+  let lastError: any;
+  for (const c of referrerCandidates) {
+    try {
+      const resp = await tryFetch(c.referrer, c.policy);
+      if (resp.ok) return resp;
+
+      // 若是 403/401，继续换 referrer 尝试
+      if (resp.status === 401 || resp.status === 403) {
+        continue;
+      }
+      lastError = new Error(`HTTP ${resp.status}`);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+
+  throw lastError || new Error('image download failed');
+}
+
 
 /**
  * 在 background 中下载图片（绕过 CORS/防盗链）
@@ -344,16 +369,7 @@ async function downloadImagesInBackground(
     const url = imageUrls[i];
     try {
       console.log(`[publish-engine] 下载图片 ${i + 1}/${imageUrls.length}: ${url}`);
-      const imageOrigin = new URL(url).origin;
-      const response = await fetch(url, {
-        method: 'GET',
-        credentials: 'omit',
-        referrer: imageOrigin + '/',
-        referrerPolicy: 'origin',
-        headers: {
-          Accept: 'image/webp,image/apng,image/*,*/*;q=0.8',
-        },
-      });
+      const response = await fetchImageWithBestEffort(url);
 
       if (!response.ok) {
         console.error(`[publish-engine] 下载失败: HTTP ${response.status}`);
@@ -390,7 +406,8 @@ const PLATFORM_URLS: Record<string, string> = {
   cnblogs: 'https://www.cnblogs.com/',
   '51cto': 'https://blog.51cto.com/',
   'tencent-cloud': 'https://cloud.tencent.com/developer/',
-  aliyun: 'https://developer.aliyun.com/',
+  // 阿里云图片上传接口可能依赖页面环境（如 CSRF meta），使用新建文章页更稳妥
+  aliyun: 'https://developer.aliyun.com/article/new#/',
   segmentfault: 'https://segmentfault.com/',
   bilibili: 'https://www.bilibili.com/',
   oschina: 'https://www.oschina.net/',
@@ -441,16 +458,7 @@ async function uploadImagesInPlatform(
     const url = imageUrls[i];
     try {
       console.log(`[publish-engine] 下载图片 ${i + 1}/${imageUrls.length}: ${url}`);
-      const imageOrigin = new URL(url).origin;
-      const response = await fetch(url, {
-        method: 'GET',
-        credentials: 'omit',
-        referrer: imageOrigin + '/',
-        referrerPolicy: 'origin',
-        headers: {
-          Accept: 'image/webp,image/apng,image/*,*/*;q=0.8',
-        },
-      });
+      const response = await fetchImageWithBestEffort(url);
 
       if (!response.ok) {
         console.error(`[publish-engine] 下载失败: HTTP ${response.status}`);
@@ -548,6 +556,34 @@ async function uploadImagesInPlatform(
       });
     };
 
+    const waitForNewUrlInText = async (
+      el: HTMLTextAreaElement | HTMLInputElement,
+      beforeText: string,
+      originalUrl: string,
+      timeoutMs: number
+    ): Promise<string> => {
+      const start = Date.now();
+      const norm = (u: string) => (u.startsWith('//') ? 'https:' + u : u);
+      const urlRe = /(?:https?:)?\/\/[^\s)'"<>]+/g;
+
+      while (Date.now() - start < timeoutMs) {
+        const current = el.value || '';
+        if (current !== beforeText) {
+          const matches = current.match(urlRe) || [];
+          for (let i = matches.length - 1; i >= 0; i--) {
+            const candidate = norm(matches[i]);
+            if (!candidate) continue;
+            if (candidate === originalUrl) continue;
+            if (beforeText.includes(candidate)) continue;
+            return candidate;
+          }
+        }
+        await new Promise((r) => setTimeout(r, 200));
+      }
+
+      throw new Error('waitForNewUrlInText timeout');
+    };
+
     const ensureEditor = async (selector: string, timeoutMs: number): Promise<HTMLElement | null> => {
       const start = Date.now();
       while (Date.now() - start < timeoutMs) {
@@ -603,11 +639,19 @@ async function uploadImagesInPlatform(
           const blob = await dataUrlToBlob(img.base64);
           const file = new File([blob], 'image_' + Date.now(), { type: blob.type || img.mimeType });
 
-          await focusEditor(editor);
+          const isTextInput = (node: any): node is HTMLTextAreaElement | HTMLInputElement =>
+            node && typeof node.value === 'string';
 
-          const beforeSrcSet = new Set(
-            Array.from(editor.querySelectorAll('img')).map((el: any) => el.src)
-          );
+          const pasteTarget =
+            (editor.matches?.('textarea, input, [contenteditable="true"]') ? editor : null) ||
+            (editor.querySelector?.('textarea, input, [contenteditable="true"]') as HTMLElement | null) ||
+            editor;
+
+          await focusEditor(pasteTarget);
+
+          const beforeText = isTextInput(pasteTarget) ? (pasteTarget.value || '') : '';
+
+          const beforeSrcSet = new Set(Array.from(editor.querySelectorAll('img')).map((el: any) => el.src));
 
           const simulatePaste = (): boolean => {
             try {
@@ -621,7 +665,7 @@ async function uploadImagesInPlatform(
               Object.defineProperty(event, 'clipboardData', {
                 get: () => dt,
               });
-              return editor.dispatchEvent(event);
+              return pasteTarget.dispatchEvent(event);
             } catch (e) {
               console.error('[image-upload] simulate paste failed', e);
               return false;
@@ -634,10 +678,10 @@ async function uploadImagesInPlatform(
               dt.items.add(file);
               const dragOver = new DragEvent('dragover', { bubbles: true, cancelable: true });
               Object.defineProperty(dragOver, 'dataTransfer', { get: () => dt });
-              editor.dispatchEvent(dragOver);
+              pasteTarget.dispatchEvent(dragOver);
               const drop = new DragEvent('drop', { bubbles: true, cancelable: true });
               Object.defineProperty(drop, 'dataTransfer', { get: () => dt });
-              return editor.dispatchEvent(drop);
+              return pasteTarget.dispatchEvent(drop);
             } catch (e) {
               console.error('[image-upload] simulate drop failed', e);
               return false;
@@ -651,7 +695,7 @@ async function uploadImagesInPlatform(
             pastedOk = simulateDrop();
           }
           if (!pastedOk && document.execCommand) {
-            await focusEditor(editor);
+            await focusEditor(pasteTarget);
             pastedOk = document.execCommand('paste');
           }
 
@@ -659,7 +703,9 @@ async function uploadImagesInPlatform(
             throw new Error('触发粘贴失败：浏览器未接受事件');
           }
 
-          const newUrl = await waitForNewUrl(editor, beforeSrcSet, cfg.timeoutMs || 30000);
+          const newUrl = isTextInput(pasteTarget)
+            ? await waitForNewUrlInText(pasteTarget, beforeText, img.url, cfg.timeoutMs || 30000)
+            : await waitForNewUrl(editor, beforeSrcSet, cfg.timeoutMs || 30000);
 
           console.log('[image-upload] DOM 粘贴成功:', newUrl);
           results.push({ originalUrl: img.url, newUrl, success: true });
@@ -702,6 +748,41 @@ async function uploadImagesInPlatform(
             headers[headerName || name] = token;
           }
         }
+
+        // 通用兜底：很多站点（含阿里系）会把 CSRF/XSRF 放在 cookie 或 meta 中，
+        // 但策略可能未显式配置。这里做一次轻量自动探测，提升“站内上传 API”的成功率。
+        const getCookie = (name: string) => {
+          const m = document.cookie.match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)'));
+          return m ? decodeURIComponent(m[1]) : null;
+        };
+        const getMeta = (name: string) => {
+          const meta = document.querySelector('meta[name="' + name + '"], meta[property="' + name + '"]');
+          return meta?.getAttribute('content') || null;
+        };
+
+        const xsrfCookie =
+          getCookie('XSRF-TOKEN') ||
+          getCookie('xsrf-token') ||
+          getCookie('_xsrf') ||
+          getCookie('csrfToken') ||
+          getCookie('csrf-token') ||
+          getCookie('_csrf');
+
+        const csrfMeta =
+          getMeta('csrf-token') ||
+          getMeta('_csrf') ||
+          getMeta('csrf') ||
+          getMeta('x-csrf-token');
+
+        if (xsrfCookie) {
+          if (!headers['x-xsrf-token']) headers['x-xsrf-token'] = xsrfCookie;
+          if (!headers['x-csrftoken']) headers['x-csrftoken'] = xsrfCookie;
+        }
+        if (csrfMeta) {
+          if (!headers['x-csrf-token']) headers['x-csrf-token'] = csrfMeta;
+          if (!headers['csrf-token']) headers['csrf-token'] = csrfMeta;
+        }
+        if (!headers['x-requested-with']) headers['x-requested-with'] = 'XMLHttpRequest';
 
         const uploadResponse = await fetch(strategyConfig.uploadUrl, {
           method: strategyConfig.method || 'POST',
@@ -766,10 +847,13 @@ async function uploadImagesInPlatform(
   };
 
   try {
+    // `chrome.scripting.executeScript` 参数需要可结构化克隆，策略对象里可能包含函数等不可序列化字段。
+    // 这里显式做一次 JSON 序列化以剥离不可序列化字段（如 responseParser）。
+    const serializableStrategy = JSON.parse(JSON.stringify(strategy));
     const results = await executeInOrigin(
       targetUrl,
       uploadFunction,
-      [downloadedImages, strategy],
+      [downloadedImages, serializableStrategy],
       { closeTab: true, active: strategy.mode === 'domPasteUpload' }
     );
 
@@ -872,7 +956,7 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
     const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     let match;
     while ((match = mdImageRegex.exec(post.body_md)) !== null) {
-      const url = match[2];
+      const url = (match[2] || '').trim();
       if (url && !seen.has(url) && isExternalImage(url)) {
         seen.add(url);
         images.push({
@@ -953,6 +1037,32 @@ function guessImageFormat(url: string): 'jpeg' | 'png' | 'webp' | 'gif' | 'svg' 
     default:
       return 'jpeg';
   }
+}
+
+function normalizeMarkdownImageUrls(markdown: string): string {
+  if (!markdown) return markdown;
+
+  return markdown.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_m, alt: string, rawInner: string) => {
+    let inner = String(rawInner || '').trim();
+
+    // 分离可选 title（通常以引号开始），避免把 title 里的空格也压缩掉
+    let titlePart = '';
+    const quoteIdx = inner.search(/["']/);
+    if (quoteIdx > 0) {
+      titlePart = inner.slice(quoteIdx).trim();
+      inner = inner.slice(0, quoteIdx).trimEnd();
+    }
+
+    // 支持 ![](<url>) 写法：去掉包裹的尖括号
+    if (inner.startsWith('<') && inner.endsWith('>')) {
+      inner = inner.slice(1, -1);
+    }
+
+    // 去除 URL 中可能混入的空格/换行（如 `. jpeg`）
+    const normalizedUrl = inner.replace(/\s+/g, '');
+
+    return `![${alt}](${normalizedUrl}${titlePart ? ' ' + titlePart : ''})`;
+  });
 }
 
 

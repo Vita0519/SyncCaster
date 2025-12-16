@@ -171,14 +171,16 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
    * Aliyun developer community
    */
   aliyun: {
-    mode: 'binaryUpload',
+    // 阿里云不接受大多数外链图（例如 CSDN 图床防盗链），优先使用站内“粘贴上传”让平台生成可用 URL
+    mode: 'domPasteUpload',
     constraints: WEBP_CONSTRAINTS,
-    uploadUrl: 'https://developer.aliyun.com/api/image/upload',
-    method: 'POST',
-    fileFieldName: 'file',
-    responseParser: (data) => ({
-      url: data.data?.url || data.url,
-    }),
+    domPasteConfig: {
+      editorUrl: 'https://developer.aliyun.com/article/new#/',
+      // 兼容：mditor/CodeMirror/Bytemd 等实现（textarea 或 contenteditable）
+      editorSelector:
+        '.mditor textarea, .mditor .CodeMirror textarea, .bytemd-editor textarea, .CodeMirror textarea, [contenteditable="true"]',
+      timeoutMs: 40000,
+    },
   },
 
   /**
