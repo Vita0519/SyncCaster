@@ -13,20 +13,11 @@
           :href="sourceUrl" 
           target="_blank" 
           rel="noopener noreferrer"
-          class="text-blue-600 hover:text-blue-800 hover:underline truncate flex-1"
+          class="text-blue-600 hover:text-blue-800 hover:underline truncate"
           :title="sourceUrl"
         >
           {{ sourceUrl }}
         </a>
-        <button
-          @click="copyText(sourceUrl, '链接')"
-          class="p-1 rounded hover:bg-blue-100 text-blue-600"
-          title="复制链接"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-          </svg>
-        </button>
       </div>
 
       <!-- 标题框 -->
@@ -231,15 +222,22 @@
                 <div
                   v-for="account in enabledAccounts"
                   :key="account.id"
-                  class="flex items-center gap-3 p-3 border rounded-lg hover:bg-gray-50 transition-colors cursor-pointer"
-                  :class="selectedAccounts.includes(account.id) ? 'border-blue-500 bg-blue-50' : 'border-gray-200'"
-                  @click="toggleAccount(account.id)"
+                  class="flex items-center gap-3 p-3 border rounded-lg transition-colors"
+                  :class="[
+                    isAccountDisabled(account) 
+                      ? 'border-gray-200 bg-gray-50 cursor-not-allowed opacity-60' 
+                      : selectedAccounts.includes(account.id) 
+                        ? 'border-blue-500 bg-blue-50 cursor-pointer hover:bg-blue-100' 
+                        : 'border-gray-200 cursor-pointer hover:bg-gray-50'
+                  ]"
+                  @click="!isAccountDisabled(account) && toggleAccount(account.id)"
                 >
                   <input
                     type="checkbox"
                     :checked="selectedAccounts.includes(account.id)"
-                    class="w-4 h-4 text-blue-600 rounded"
-                    @click.stop="toggleAccount(account.id)"
+                    :disabled="isAccountDisabled(account)"
+                    class="w-4 h-4 text-blue-600 rounded disabled:cursor-not-allowed"
+                    @click.stop="!isAccountDisabled(account) && toggleAccount(account.id)"
                   />
                   <img
                     v-if="account.avatar"
@@ -247,11 +245,23 @@
                     :alt="account.nickname"
                     class="w-8 h-8 rounded-full"
                   />
-                  <div class="flex-1">
+                  <div class="flex-1 min-w-0">
                     <div class="font-medium text-gray-800">{{ account.nickname }}</div>
-                    <div class="text-xs text-gray-500">{{ getPlatformName(account.platform) }}</div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-gray-500">{{ getPlatformName(account.platform) }}</span>
+                      <!-- 状态标签：与账号管理保持一致 -->
+                      <span 
+                        v-if="account.status === 'expired'" 
+                        class="text-xs px-1.5 py-0.5 rounded bg-red-100 text-red-600"
+                        :title="account.lastError || '账号登录已失效，请重新登录'"
+                      >已失效</span>
+                      <span 
+                        v-else-if="account.status === 'error'" 
+                        class="text-xs px-1.5 py-0.5 rounded bg-yellow-100 text-yellow-600"
+                        :title="account.lastError || '检测异常，可能是临时问题'"
+                      >检测异常</span>
+                    </div>
                   </div>
-                  <span class="text-xl">{{ getPlatformIcon(account.platform) }}</span>
                 </div>
               </div>
 
@@ -361,10 +371,21 @@ const publishing = ref(false);
 const enabledAccounts = ref<Account[]>([]);
 const selectedAccounts = ref<string[]>([]);
 
-// 计算是否全选
+// 判断账号是否不可用（与账号管理状态同步）
+function isAccountDisabled(account: Account): boolean {
+  return account.status === AccountStatus.EXPIRED || account.status === AccountStatus.ERROR;
+}
+
+// 获取可用账号列表（排除 expired 和 error 状态）
+const availableAccounts = computed(() => {
+  return enabledAccounts.value.filter(account => !isAccountDisabled(account));
+});
+
+// 计算是否全选（只计算可用账号）
 const allSelected = computed(() => {
-  return enabledAccounts.value.length > 0 && 
-         selectedAccounts.value.length === enabledAccounts.value.length;
+  const available = availableAccounts.value;
+  return available.length > 0 && 
+         available.every(a => selectedAccounts.value.includes(a.id));
 });
 
 // 预览 HTML
@@ -417,12 +438,17 @@ async function copyPreview() {
       'text/plain': new Blob([plain], { type: 'text/plain' }),
     });
     await navigator.clipboard.write([item]);
-    showCopySuccess('已复制预览（保留格式）');
+    showCopySuccess('已复制预览内容');
     return;
   } catch {}
 
   // fallback: plain text
-  await copyText(plain, '预览');
+  try {
+    await navigator.clipboard.writeText(plain);
+    showCopySuccess('已复制预览内容');
+  } catch {
+    // Silently ignore copy errors
+  }
 }
 
 // 预览图片
@@ -577,8 +603,13 @@ function getPlatformIcon(platform: string): string {
   return icons[platform] || '📄';
 }
 
-// 切换账号选择
+// 切换账号选择（仅可用账号可操作）
 function toggleAccount(accountId: string) {
+  const account = enabledAccounts.value.find(a => a.id === accountId);
+  if (account && isAccountDisabled(account)) {
+    return; // 不可用账号不允许选择
+  }
+  
   const index = selectedAccounts.value.indexOf(accountId);
   if (index > -1) {
     selectedAccounts.value.splice(index, 1);
@@ -587,12 +618,20 @@ function toggleAccount(accountId: string) {
   }
 }
 
-// 全选/取消全选
+// 全选/取消全选（仅操作可用账号）
 function toggleSelectAll() {
+  const available = availableAccounts.value;
   if (allSelected.value) {
-    selectedAccounts.value = [];
+    // 取消全选：移除所有可用账号
+    selectedAccounts.value = selectedAccounts.value.filter(
+      id => !available.some(a => a.id === id)
+    );
   } else {
-    selectedAccounts.value = enabledAccounts.value.map(a => a.id);
+    // 全选：添加所有可用账号
+    const availableIds = available.map(a => a.id);
+    const currentIds = new Set(selectedAccounts.value);
+    availableIds.forEach(id => currentIds.add(id));
+    selectedAccounts.value = Array.from(currentIds);
   }
 }
 

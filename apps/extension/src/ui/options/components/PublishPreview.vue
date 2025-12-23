@@ -100,6 +100,23 @@
       </div>
     </div>
 
+    <!-- 复制成功提示 -->
+    <transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="opacity-0 translate-y-2"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 translate-y-2"
+    >
+      <div
+        v-if="showCopyTip"
+        class="fixed bottom-4 right-4 bg-green-500 text-white px-4 py-2 rounded-lg shadow-lg z-50"
+      >
+        ✓ {{ copyTipMessage }}
+      </div>
+    </transition>
+
     <!-- 平台差异说明 -->
     <div class="mt-4 text-sm text-gray-500">
       <div v-if="currentPlatform?.warnings?.length" class="space-y-1">
@@ -254,13 +271,27 @@ function flashCopyTip(message: string) {
 }
 
 async function copyCurrentPreview() {
+  const isCsdn = activePlatform.value === 'csdn';
   const isWechat = activePlatform.value === 'wechat';
+  const platformName = currentPlatform.value?.name || '预览';
+  
+  // CSDN 使用 Markdown 编辑器，直接复制 Markdown 内容
+  if (isCsdn) {
+    const markdown = props.content || '';
+    try {
+      await navigator.clipboard.writeText(markdown);
+      flashCopyTip(`已复制${platformName} Markdown内容`);
+    } catch {
+      // Silently ignore copy errors
+    }
+    return;
+  }
+  
   const bodyHtml = isWechat ? (wechatPreviewHtml.value || '') : (previewHtml.value || '');
   const titleHtml = `<h1>${props.title || ''}</h1>`;
   const styleHtml = isWechat && wechatPreviewCss.value ? `<style>${wechatPreviewCss.value}</style>` : '';
   const fullHtml = `${styleHtml}${titleHtml}${bodyHtml}`;
   const plain = stripHtmlToText(fullHtml);
-  const platformName = currentPlatform.value?.name || '预览';
 
   try {
     const item = new ClipboardItem({
@@ -268,13 +299,13 @@ async function copyCurrentPreview() {
       'text/plain': new Blob([plain], { type: 'text/plain' }),
     });
     await navigator.clipboard.write([item]);
-    flashCopyTip(`已复制${platformName}预览（保留格式）`);
+    flashCopyTip(`已复制${platformName}预览内容`);
     return;
   } catch {}
 
   try {
     await navigator.clipboard.writeText(plain);
-    flashCopyTip(`已复制${platformName}预览`);
+    flashCopyTip(`已复制${platformName}预览内容`);
   } catch {}
 }
 
