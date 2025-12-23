@@ -362,12 +362,27 @@ async function refreshAllAccounts() {
       }
       
       if (failedAccounts && failedAccounts.length > 0) {
-        const expiredNames = failedAccounts
-          .filter((f: any) => f.account.status === 'expired' || f.errorType === 'logged_out')
+        // 显示所有失败的平台名称，不仅仅是 expired 状态
+        const failedNames = failedAccounts
           .map((f: any) => getPlatformName(f.account.platform))
           .join('、');
-        if (expiredNames) {
-          message.error(`以下账号需重新登录：${expiredNames}`, { duration: 5000 });
+        if (failedNames) {
+          // 区分真正失效和检测异常
+          const expiredList = failedAccounts.filter((f: any) => 
+            f.account.status === 'expired' || f.errorType === 'logged_out'
+          );
+          const errorList = failedAccounts.filter((f: any) => 
+            f.account.status !== 'expired' && f.errorType !== 'logged_out'
+          );
+          
+          if (expiredList.length > 0) {
+            const expiredNames = expiredList.map((f: any) => getPlatformName(f.account.platform)).join('、');
+            message.error(`以下账号需重新登录：${expiredNames}`, { duration: 5000 });
+          }
+          if (errorList.length > 0) {
+            const errorNames = errorList.map((f: any) => getPlatformName(f.account.platform)).join('、');
+            message.warning(`以下账号检测异常：${errorNames}`, { duration: 5000 });
+          }
         }
       }
       

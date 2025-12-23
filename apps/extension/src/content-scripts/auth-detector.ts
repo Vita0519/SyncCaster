@@ -1158,6 +1158,16 @@ const segmentfaultDetector: PlatformAuthDetector = {
   id: 'segmentfault',
   urlPatterns: [/segmentfault\.com/],
   async checkLogin(): Promise<LoginState> {
+    const isSegmentfaultSlugLike = (value: string): boolean => {
+      const v = value.trim();
+      if (!v || v.length > 50) return false;
+      return /^[a-zA-Z0-9_-]{2,50}$/.test(v);
+    };
+
+    const slugFromUrl = (() => {
+      const match = window.location.pathname.match(/^\/u\/([^\/?#]+)/);
+      return match?.[1];
+    })();
     log('segmentfault', '检测登录状态...');
     
     // 辅助函数：从 DOM 中提取用户信息
@@ -1165,6 +1175,44 @@ const segmentfaultDetector: PlatformAuthDetector = {
       let nickname: string | undefined;
       let avatar: string | undefined;
       let userId: string | undefined;
+
+      const considerNickname = (raw?: string) => {
+        const text = raw?.trim();
+        if (!text || text.length >= 50) return;
+
+        if (slugFromUrl && text === slugFromUrl && nickname && nickname !== slugFromUrl) return;
+
+        if (!nickname) {
+          nickname = text;
+          return;
+        }
+
+        const currentSlugLike = isSegmentfaultSlugLike(nickname);
+        const nextSlugLike = isSegmentfaultSlugLike(text);
+        if (currentSlugLike && !nextSlugLike) nickname = text;
+      };
+
+      if (window.location.pathname.startsWith('/u/')) {
+        const profileNameSelectors = [
+          '[class*="profile"] [class*="name"]',
+          '[class*="user"] [class*="name"]',
+          '.user__name',
+          '.user-name',
+          '.profile__name',
+          '.profile-name',
+          'main h1',
+          'main h2',
+        ];
+
+        for (const selector of profileNameSelectors) {
+          const el = document.querySelector(selector) as HTMLElement | null;
+          if (!el) continue;
+          const rect = el.getBoundingClientRect?.();
+          if (rect && rect.top > 600) continue;
+          considerNickname(el.textContent || undefined);
+          if (nickname && (!slugFromUrl || nickname !== slugFromUrl)) break;
+        }
+      }
       
       // 1. 尝试从导航栏用户头像区域提取
       const navUserSelectors = [
@@ -1188,10 +1236,7 @@ const segmentfaultDetector: PlatformAuthDetector = {
           // 提取用户名
           const nameEl = navUser.querySelector('[class*="name"], [class*="nick"], a[href^="/u/"]');
           if (nameEl) {
-            const text = nameEl.textContent?.trim();
-            if (text && text.length > 0 && text.length < 50) {
-              nickname = text;
-            }
+            considerNickname(nameEl.textContent || undefined);
           }
           
           // 提取用户 slug
@@ -1216,10 +1261,7 @@ const segmentfaultDetector: PlatformAuthDetector = {
           if (match?.[1]) {
             userId = match[1];
             if (!nickname) {
-              const text = link.textContent?.trim();
-              if (text && text.length > 0 && text.length < 50) {
-                nickname = text;
-              }
+              considerNickname(link.textContent || undefined);
             }
             break;
           }
@@ -1271,10 +1313,16 @@ const segmentfaultDetector: PlatformAuthDetector = {
         for (const user of userPaths) {
           if (user && (user.id || user.uid || user.slug || user.name)) {
             // 思否中 name 是 URL slug，nickname 才是真实显示名称
-            const displayName = user.nickname || user.nick || user.name || '';
+            const nameField = typeof user.name === 'string' ? user.name : '';
+            const displayName =
+              user.nickName ||
+              user.nickname ||
+              user.nick ||
+              (!isSegmentfaultSlugLike(nameField) ? nameField : '') ||
+              '';
             log('segmentfault', '从全局变量获取到用户信息', { nickname: displayName, slug: user.name });
             return {
-              userId: String(user.id || user.uid || user.slug || ''),
+              userId: String(user.slug || user.name || user.username || user.id || user.uid || ''),
               nickname: displayName,
               avatar: user.avatar || user.avatarUrl || user.avatar_url,
             };
@@ -1287,7 +1335,7 @@ const segmentfaultDetector: PlatformAuthDetector = {
     
     // 1. 首先尝试从全局变量获取用户信息
     const globalUser = extractUserFromGlobal();
-    if (globalUser && (globalUser.nickname || globalUser.userId)) {
+    if (globalUser && globalUser.nickname && globalUser.nickname.trim()) {
       return {
         loggedIn: true,
         platform: 'segmentfault',
@@ -1326,12 +1374,18 @@ const segmentfaultDetector: PlatformAuthDetector = {
             
             if (isSuccess && user && (user.id || user.uid || user.slug || user.name)) {
               // 思否中 name 是 URL slug，nickname 才是真实显示名称
-              const displayName = user.nickname || user.nick || user.name || user.username || '';
+              const nameField = typeof user.name === 'string' ? user.name : '';
+              const displayName =
+                user.nickName ||
+                user.nickname ||
+                user.nick ||
+                (!isSegmentfaultSlugLike(nameField) ? nameField : '') ||
+                '';
               log('segmentfault', '从 API 获取到用户信息', { endpoint, nickname: displayName, slug: user.name });
               return {
                 loggedIn: true,
                 platform: 'segmentfault',
-                userId: String(user.id || user.uid || user.slug || ''),
+                userId: String(user.slug || user.name || user.username || user.id || user.uid || ''),
                 nickname: displayName || '思否用户',
                 avatar: user.avatar || user.avatarUrl || user.avatar_url,
                 meta: {
@@ -1361,6 +1415,17 @@ const segmentfaultDetector: PlatformAuthDetector = {
     }
     
     // 4. 检查页面中是否有退出/设置按钮（登录后才有）
+    // If global state indicates logged-in but we couldn't extract a visible nickname, fall back to it.
+    if (globalUser && globalUser.userId) {
+      return {
+        loggedIn: true,
+        platform: 'segmentfault',
+        userId: globalUser.userId,
+        nickname: globalUser.nickname || '思否用户',
+        avatar: globalUser.avatar,
+      };
+    }
+
     const logoutSelectors = [
       'a[href*="logout"]',
       'a[href*="/user/logout"]',
@@ -1475,66 +1540,289 @@ const bilibiliDetector: PlatformAuthDetector = {
 };
 
 // ============================================================
-// 开源中国检测器 - API 优先
+// 开源中国检测器 - 多重检测策略
+// 
+// 开源中国网站特点：
+// 1. 登录后页面右上角显示用户头像和昵称
+// 2. 用户主页格式：https://my.oschina.net/u/{userId}
+// 3. 可能存在全局变量 G_USER
+// 4. 登录页面：https://www.oschina.net/home/login
 // ============================================================
 const oschinaDetector: PlatformAuthDetector = {
   id: 'oschina',
   urlPatterns: [/oschina\.net/],
   async checkLogin(): Promise<LoginState> {
     log('oschina', '检测登录状态...');
+    const url = window.location.href;
     
-    // 尝试 API
+    // 辅助函数：从 DOM 中提取用户信息
+    const extractUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
+      let nickname: string | undefined;
+      let avatar: string | undefined;
+      let userId: string | undefined;
+      
+      // 1. 尝试从导航栏用户区域提取
+      const userNavSelectors = [
+        '.user-info',
+        '.current-user',
+        '.header-user',
+        '.nav-user',
+        '#userSidebar',
+        '.user-nav',
+        '[class*="user"][class*="info"]',
+        '[class*="user"][class*="nav"]',
+      ];
+      
+      for (const selector of userNavSelectors) {
+        try {
+          const userNav = document.querySelector(selector);
+          if (userNav) {
+            // 提取头像
+            const avatarImg = userNav.querySelector('img') as HTMLImageElement;
+            if (avatarImg?.src && avatarImg.src.includes('http') && !avatarImg.src.includes('default')) {
+              avatar = avatarImg.src;
+            }
+            
+            // 提取昵称
+            const nameEl = userNav.querySelector('[class*="name"], [class*="nick"], a[href*="/u/"]');
+            if (nameEl?.textContent?.trim()) {
+              nickname = nameEl.textContent.trim();
+            }
+            
+            // 提取用户 ID
+            const userLink = userNav.querySelector('a[href*="/u/"]') as HTMLAnchorElement;
+            if (userLink) {
+              const match = userLink.href.match(/\/u\/(\d+)/);
+              if (match?.[1]) {
+                userId = match[1];
+              }
+            }
+            
+            if (avatar || nickname || userId) break;
+          }
+        } catch {}
+      }
+      
+      // 2. 尝试从页面中的用户链接提取
+      if (!userId) {
+        const userLinks = document.querySelectorAll('a[href*="my.oschina.net/u/"]');
+        for (const link of userLinks) {
+          const href = (link as HTMLAnchorElement).href;
+          const match = href.match(/\/u\/(\d+)/);
+          if (match?.[1]) {
+            userId = match[1];
+            if (!nickname && link.textContent?.trim()) {
+              nickname = link.textContent.trim();
+            }
+            break;
+          }
+        }
+      }
+      
+      // 3. 尝试从头像图片提取
+      if (!avatar) {
+        const avatarImgs = document.querySelectorAll('img[class*="avatar"], img[src*="oscimg.oschina.net"]');
+        for (const img of avatarImgs) {
+          const src = (img as HTMLImageElement).src;
+          if (src && src.includes('http') && !src.includes('default') && !src.includes('placeholder')) {
+            avatar = src;
+            break;
+          }
+        }
+      }
+      
+      return { nickname, avatar, userId };
+    };
+    
+    // 1. 检查是否在登录页面
+    if (url.includes('/home/login') || url.includes('/login')) {
+      // 检查是否有登录成功的迹象（可能是登录后的重定向）
+      const domUser = extractUserFromDom();
+      if (domUser.userId || domUser.nickname) {
+        log('oschina', '在登录页但检测到用户信息，可能已登录', domUser);
+        return {
+          loggedIn: true,
+          platform: 'oschina',
+          userId: domUser.userId,
+          nickname: domUser.nickname || '开源中国用户',
+          avatar: domUser.avatar,
+        };
+      }
+      log('oschina', '在登录页面，未检测到登录状态');
+      return { loggedIn: false, platform: 'oschina' };
+    }
+    
+    // 2. 检查全局变量
+    const win = window as any;
+    if (win.G_USER?.id) {
+      log('oschina', '从全局变量 G_USER 获取到用户信息', { id: win.G_USER.id, name: win.G_USER.name });
+      return {
+        loggedIn: true,
+        platform: 'oschina',
+        userId: String(win.G_USER.id),
+        nickname: win.G_USER.name || win.G_USER.account || '开源中国用户',
+        avatar: win.G_USER.portrait || win.G_USER.avatar,
+      };
+    }
+    
+    // 检查其他可能的全局变量
+    const possibleUserVars = [
+      win.__USER__,
+      win.__INITIAL_STATE__?.user,
+      win.pageData?.user,
+      win.currentUser,
+    ];
+    
+    for (const userData of possibleUserVars) {
+      if (userData && (userData.id || userData.uid)) {
+        log('oschina', '从全局变量获取到用户信息', userData);
+        return {
+          loggedIn: true,
+          platform: 'oschina',
+          userId: String(userData.id || userData.uid),
+          nickname: userData.name || userData.nickname || userData.account || '开源中国用户',
+          avatar: userData.portrait || userData.avatar,
+        };
+      }
+    }
+    
+    // 3. 尝试 API
     try {
       const res = await fetch('https://www.oschina.net/action/user/info', {
         credentials: 'include',
-        headers: { 'Accept': 'application/json' },
+        headers: { 
+          'Accept': 'application/json, text/plain, */*',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
       });
+      
       if (res.ok) {
-        const data = await res.json();
-        if (data.code === 0 || data.result?.id || data.id) {
-          const user = data.result || data;
-          log('oschina', '从 API 获取到用户信息', { nickname: user.name });
-          return {
-            loggedIn: true,
-            platform: 'oschina',
-            userId: String(user.id),
-            nickname: user.name || user.nickname || '开源中国用户',
-            avatar: user.portrait || user.avatar,
-            meta: {
-              followersCount: user.fansCount,
-              articlesCount: user.blogCount,
-            },
-          };
+        const text = await res.text();
+        log('oschina', 'API 响应', { status: res.status, text: text.substring(0, 300) });
+        
+        // 检查是否是 HTML（重定向到登录页）
+        if (!text.includes('<!DOCTYPE') && !text.includes('<html')) {
+          try {
+            const data = JSON.parse(text);
+            const user = data.result || data.data || data;
+            
+            if (user && user.id) {
+              log('oschina', '从 API 获取到用户信息', { id: user.id, name: user.name });
+              return {
+                loggedIn: true,
+                platform: 'oschina',
+                userId: String(user.id),
+                nickname: user.name || user.nickname || user.account || '开源中国用户',
+                avatar: user.portrait || user.avatar,
+                meta: {
+                  followersCount: user.fansCount,
+                  articlesCount: user.blogCount,
+                },
+              };
+            }
+          } catch (parseErr) {
+            log('oschina', 'API 响应解析失败', parseErr);
+          }
         }
       }
     } catch (e) {
       log('oschina', 'API 调用失败', e);
     }
     
-    // 检查全局变量
-    const win = window as any;
-    if (win.G_USER?.id) {
+    // 4. 从 DOM 中提取用户信息
+    const domUser = extractUserFromDom();
+    if (domUser.userId || domUser.nickname || domUser.avatar) {
+      log('oschina', '从 DOM 获取到用户信息', domUser);
       return {
         loggedIn: true,
         platform: 'oschina',
-        userId: String(win.G_USER.id),
-        nickname: win.G_USER.name || '开源中国用户',
-        avatar: win.G_USER.portrait,
+        userId: domUser.userId,
+        nickname: domUser.nickname || '开源中国用户',
+        avatar: domUser.avatar,
       };
     }
     
-    // 检查 Cookie
+    // 5. 检查登录/退出按钮
+    // 如果有退出按钮，说明已登录
+    const logoutSelectors = [
+      'a[href*="logout"]',
+      'a[href*="/action/user/logout"]',
+      '[class*="logout"]',
+      '[data-action="logout"]',
+    ];
+    
+    for (const selector of logoutSelectors) {
+      try {
+        const el = document.querySelector(selector);
+        if (el) {
+          log('oschina', '检测到退出按钮，判定为已登录', { selector });
+          return {
+            loggedIn: true,
+            platform: 'oschina',
+            nickname: '开源中国用户',
+          };
+        }
+      } catch {}
+    }
+    
+    // 如果有登录按钮，说明未登录
+    const loginSelectors = [
+      'a[href*="/home/login"]',
+      'a[href*="login"]',
+      '.login-btn',
+      '[class*="login"][class*="btn"]',
+    ];
+    
+    let hasLoginBtn = false;
+    for (const selector of loginSelectors) {
+      try {
+        const el = document.querySelector(selector);
+        if (el && (el.textContent?.includes('登录') || el.textContent?.includes('Login'))) {
+          hasLoginBtn = true;
+          log('oschina', '检测到登录按钮', { selector, text: el.textContent });
+          break;
+        }
+      } catch {}
+    }
+    
+    // 6. 检查 Cookie
     try {
       const cookies = document.cookie;
-      if (cookies.includes('oscid=') || cookies.includes('user=')) {
+      log('oschina', '当前 Cookie', { cookies: cookies.substring(0, 200) });
+      
+      // 检查关键 Cookie
+      const hasOscid = cookies.includes('oscid=') && !cookies.includes('oscid=;') && !cookies.includes('oscid=deleted');
+      const hasUserId = (cookies.includes('user_id=') || cookies.includes('_user_id=')) && 
+                        !cookies.includes('user_id=;') && !cookies.includes('user_id=deleted');
+      
+      if (hasOscid || hasUserId) {
+        log('oschina', '从 Cookie 检测到登录状态', { hasOscid, hasUserId });
         return {
           loggedIn: true,
           platform: 'oschina',
           nickname: '开源中国用户',
         };
       }
-    } catch {}
+    } catch (e) {
+      log('oschina', 'Cookie 检测失败', e);
+    }
     
+    // 7. 最后尝试让 background 检测
+    const bg = await fetchPlatformInfoFromBackground('oschina');
+    if (bg?.loggedIn) {
+      log('oschina', '从 background 获取到登录状态', bg);
+      return {
+        ...bg,
+        nickname: bg.nickname || '开源中国用户',
+      };
+    }
+    
+    if (hasLoginBtn) {
+      log('oschina', '检测到登录按钮且无其他登录迹象，判定为未登录');
+      return { loggedIn: false, platform: 'oschina' };
+    }
+    
+    log('oschina', '未检测到明确的登录状态');
     return { loggedIn: false, platform: 'oschina' };
   },
 };

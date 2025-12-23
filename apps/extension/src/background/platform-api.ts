@@ -150,7 +150,18 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
   },
   'oschina': {
     url: 'https://www.oschina.net/',
-    sessionCookies: ['oscid', 'user_id'],
+    fallbackUrls: ['https://my.oschina.net/', 'https://gitee.com/'],
+    // 开源中国登录态 Cookie - 扩展列表
+    sessionCookies: [
+      'oscid',           // 主要会话 Cookie
+      'user_id',         // 用户 ID
+      '_user_id',        // 备用用户 ID
+      'oschina_new_user', // 新用户标识
+      'gitee-session-n', // Gitee 会话（开源中国与 Gitee 共享登录）
+      'gitee_user',      // Gitee 用户
+      'user_locale',     // 用户区域设置（登录后才有）
+      'tz',              // 时区（登录后设置）
+    ],
   },
   'wechat': {
     url: 'https://mp.weixin.qq.com/',
@@ -1627,10 +1638,10 @@ const segmentfaultApi: PlatformApiConfig = {
                              (user && (user.id || user.uid || user.slug || user.name));
             
             if (isSuccess && user && (user.id || user.uid || user.slug || user.name)) {
-              const userId = String(user.id || user.uid || user.slug || '');
+              const userId = String(user.slug || user.name || user.username || user.user_name || user.id || user.uid || '').trim();
               // 思否 API 中 name 是 URL slug，nickname 才是真实显示名称
               // 优先使用 nickname，其次是 nick，最后才是 name（slug）
-              const nickname = user.nickname || user.nick || user.name || user.username || '';
+              const nickname = user.nickName || user.nickname || user.nick || user.displayName || '';
               const avatar = user.avatar || user.avatarUrl || user.avatar_url || user.head || '';
               
               logger.info('segmentfault', `从 API ${endpoint} 获取到用户信息`, { userId, nickname });
@@ -1720,7 +1731,13 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
                       state.global?.user || state.data?.user;
           if (user && (user.id || user.uid || user.slug || user.name)) {
             // 思否中 name 是 URL slug，nickname 才是真实显示名称
-            const displayName = user.nickname || user.nick || user.name || '';
+            const nameField = typeof user.name === 'string' ? user.name : '';
+            const displayName =
+              user.nickName ||
+              user.nickname ||
+              user.nick ||
+              (!/^[a-zA-Z0-9_-]{2,50}$/.test(nameField.trim()) ? nameField : '') ||
+              '';
             logger.info('segmentfault', '从 __INITIAL_STATE__ 获取到用户信息', { nickname: displayName, slug: user.name });
             return {
               loggedIn: true,
@@ -1749,7 +1766,13 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
           const user = JSON.parse(match[1]);
           if (user && (user.id || user.uid || user.slug || user.name)) {
             // 思否中 name 是 URL slug，nickname 才是真实显示名称
-            const displayName = user.nickname || user.nick || user.name || '';
+            const nameField = typeof user.name === 'string' ? user.name : '';
+            const displayName =
+              user.nickName ||
+              user.nickname ||
+              user.nick ||
+              (!/^[a-zA-Z0-9_-]{2,50}$/.test(nameField.trim()) ? nameField : '') ||
+              '';
             logger.info('segmentfault', '从 script JSON 获取到用户信息', { nickname: displayName });
             return {
               loggedIn: true,
@@ -1795,12 +1818,13 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     
     let nickname: string | undefined;
     let userId: string | undefined;
-    for (const pattern of nicknamePatterns) {
+    for (let i = 0; i < nicknamePatterns.length; i++) {
+      const pattern = nicknamePatterns[i];
       const match = html.match(pattern);
       if (match?.[1]) {
         const value = match[1].trim();
         if (value && value.length > 0 && value.length < 50 && !value.includes('<')) {
-          if (pattern.source.includes('href="\/u\/')) {
+          if (i === nicknamePatterns.length - 1) {
             // 这是 slug，用作 userId
             userId = value;
           } else {
@@ -1854,30 +1878,343 @@ const oschinaApi: PlatformApiConfig = {
   id: 'oschina',
   name: '开源中国',
   async fetchUserInfo(): Promise<UserInfo> {
+    // 开源中国检测策略（精准版）：
+    // 核心原则：只从用户信息专属区域提取数据，避免误抓页面内容
+    // 1. 优先使用用户主页 API（最可靠，返回结构化数据）
+    // 2. 其次使用 Cookie 中的用户 ID 访问用户主页
+    // 3. 最后从首页顶部导航栏提取（限定在 header/nav 区域）
+    
+    // 检测结果收集
+    let cookieResult: { hasValidCookie: boolean; userId?: string; noCookieAtAll?: boolean } = { hasValidCookie: false };
+    let apiResult: { success: boolean; loggedIn?: boolean; userInfo?: any; error?: string } = { success: false };
+    let htmlResult: { success: boolean; loggedIn?: boolean; hasLoginBtn?: boolean; hasLogoutBtn?: boolean; userInfo?: any } = { success: false };
+    
+    // 1. Cookie 检测 - 获取用户 ID
     try {
-      const res = await fetchWithCookies('https://www.oschina.net/action/user/info');
+      const mainCookies = await chrome.cookies.getAll({ url: 'https://www.oschina.net/' });
+      const myCookies = await chrome.cookies.getAll({ url: 'https://my.oschina.net/' });
+      const allCookies = [...mainCookies, ...myCookies];
       
-      return parseApiResponse(res, 'oschina', (data) => {
-        if (data.code === 0 || data.result?.id || data.id) {
-          const user = data.result || data;
-          return {
-            loggedIn: true,
-            platform: 'oschina',
-            userId: String(user.id),
-            nickname: user.name || user.nickname || '开源中国用户',
-            avatar: user.portrait || user.avatar,
-            meta: {
-              followersCount: user.fansCount,
-              articlesCount: user.blogCount,
-            },
-          };
-        }
-        return null;
+      logger.info('oschina', '获取到的 Cookie', {
+        count: allCookies.length,
+        names: allCookies.map(c => c.name).slice(0, 25)
       });
+      
+      const isValidValue = (value?: string) => {
+        if (!value) return false;
+        const trimmed = value.trim();
+        if (!trimmed) return false;
+        const lower = trimmed.toLowerCase();
+        return lower !== 'deleted' && lower !== 'null' && lower !== 'undefined' && trimmed.length > 0;
+      };
+      
+      // 开源中国的关键登录态 Cookie
+      const oscidCookie = allCookies.find(c => c.name === 'oscid' && isValidValue(c.value));
+      const userIdCookie = allCookies.find(c => (c.name === 'user_id' || c.name === '_user_id') && isValidValue(c.value));
+      
+      cookieResult.noCookieAtAll = allCookies.length === 0;
+      
+      if (oscidCookie || userIdCookie) {
+        cookieResult.hasValidCookie = true;
+        cookieResult.userId = userIdCookie?.value;
+        logger.info('oschina', '检测到有效的登录 Cookie', { 
+          hasOscid: !!oscidCookie, 
+          userId: cookieResult.userId
+        });
+      } else {
+        logger.info('oschina', '未检测到有效的登录 Cookie');
+      }
     } catch (e: any) {
-      logger.error('oschina', 'API 调用失败', e);
-      return { loggedIn: false, platform: 'oschina', errorType: AuthErrorType.NETWORK_ERROR, error: e.message, retryable: true };
+      logger.warn('oschina', 'Cookie 检测失败', { error: e.message });
     }
+    
+    // 2. API 检测 - 尝试获取用户信息
+    try {
+      const res = await fetchWithCookies('https://www.oschina.net/action/user/info', {
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+          'Referer': 'https://www.oschina.net/',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+      });
+      
+      if (res.ok) {
+        const text = await res.text();
+        logger.info('oschina', 'API 响应', { status: res.status, textLength: text.length, preview: text.substring(0, 300) });
+        
+        if (!text.includes('<!DOCTYPE') && !text.includes('<html') && text.trim()) {
+          try {
+            const data = JSON.parse(text);
+            const user = data.result || data.data || data;
+            
+            // 检查是否明确返回未登录
+            if (data.code === -1 || data.code === 401 || data.message?.includes('登录') || data.message?.includes('未登录')) {
+              apiResult = { success: true, loggedIn: false, error: 'API 返回未登录' };
+              logger.info('oschina', 'API 明确返回未登录');
+            } else if (user && user.id) {
+              // API 返回的数据是最可靠的
+              apiResult = { 
+                success: true, 
+                loggedIn: true, 
+                userInfo: {
+                  userId: String(user.id),
+                  nickname: user.name || user.nickname || user.account,
+                  avatar: user.portrait || user.avatar || user.img,
+                  meta: {
+                    followersCount: user.fansCount || user.fans_count,
+                    articlesCount: user.blogCount || user.blog_count,
+                  }
+                }
+              };
+              logger.info('oschina', '从 API 获取到用户信息', { id: user.id, name: user.name });
+            }
+          } catch (parseErr: any) {
+            logger.warn('oschina', 'API 响应解析失败', { error: parseErr?.message || String(parseErr) });
+          }
+        }
+      }
+    } catch (e: any) {
+      logger.warn('oschina', 'API 调用失败', { error: e.message });
+    }
+    
+    // 3. 如果有 Cookie 中的用户 ID，尝试从用户主页获取信息（最可靠的 HTML 方式）
+    if (cookieResult.userId && !apiResult.userInfo) {
+      try {
+        const userPageRes = await fetchWithCookies(`https://my.oschina.net/u/${cookieResult.userId}`, {
+          headers: {
+            'Accept': 'text/html,application/xhtml+xml',
+            'Referer': 'https://www.oschina.net/',
+          },
+        });
+        
+        if (userPageRes.ok) {
+          const userPageHtml = await userPageRes.text();
+          logger.info('oschina', '用户主页获取成功', { length: userPageHtml.length });
+          
+          // 从用户主页提取信息（这里的信息是用户专属的，不会误抓）
+          let nickname: string | undefined;
+          let avatar: string | undefined;
+          
+          // 用户主页的昵称通常在 <title> 或专门的用户名元素中
+          // 格式通常是 "用户名 - 开源中国" 或 "用户名的个人空间"
+          const titleMatch = userPageHtml.match(/<title>([^<]+)<\/title>/i);
+          if (titleMatch?.[1]) {
+            const title = titleMatch[1].trim();
+            // 移除后缀
+            const cleanTitle = title
+              .replace(/\s*[-–—]\s*开源中国.*$/i, '')
+              .replace(/\s*的个人空间.*$/i, '')
+              .replace(/\s*的博客.*$/i, '')
+              .trim();
+            if (cleanTitle && cleanTitle.length > 0 && cleanTitle.length < 30) {
+              nickname = cleanTitle;
+            }
+          }
+          
+          // 用户主页头像 - 通常在 user-portrait 或 avatar 容器中
+          // 只匹配用户头像区域，排除文章列表中的头像
+          const avatarPatterns = [
+            // 用户信息区域的头像
+            /<div[^>]*class=["'][^"']*user-portrait[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
+            /<div[^>]*class=["'][^"']*user-header[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
+            /<div[^>]*class=["'][^"']*portrait[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
+            // 带有 user-avatar 类的图片
+            /<img[^>]+class=["'][^"']*user-avatar[^"']*["'][^>]+src=["']([^"']+)["']/i,
+            // 用户信息卡片中的头像
+            /<div[^>]*class=["'][^"']*user-info[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
+          ];
+          
+          for (const pattern of avatarPatterns) {
+            const match = userPageHtml.match(pattern);
+            if (match?.[1]) {
+              const url = match[1].trim();
+              // 验证是用户头像 URL（通常包含 oscimg 或特定路径）
+              if (url && url.startsWith('http') && 
+                  (url.includes('oscimg.oschina.net') || url.includes('/portrait/') || url.includes('/avatar/')) &&
+                  !url.includes('logo') && !url.includes('icon') && !url.includes('default')) {
+                avatar = url;
+                break;
+              }
+            }
+          }
+          
+          if (nickname || avatar) {
+            logger.info('oschina', '从用户主页提取到信息', { nickname, avatar: avatar ? '有' : '无' });
+            apiResult = {
+              success: true,
+              loggedIn: true,
+              userInfo: {
+                userId: cookieResult.userId,
+                nickname: nickname,
+                avatar: avatar,
+              }
+            };
+          }
+        }
+      } catch (e: any) {
+        logger.warn('oschina', '用户主页获取失败', { error: e.message });
+      }
+    }
+    
+    // 4. HTML 首页检测 - 仅用于判断登录状态，不提取用户信息
+    try {
+      const htmlRes = await fetchWithCookies('https://www.oschina.net/', {
+        headers: {
+          'Accept': 'text/html,application/xhtml+xml',
+          'Referer': 'https://www.oschina.net/',
+        },
+      });
+      
+      if (htmlRes.ok) {
+        const html = await htmlRes.text();
+        logger.info('oschina', 'HTML 页面获取成功', { length: html.length });
+        
+        // 只提取页面头部区域（前 20000 字符，通常包含导航栏）
+        const headerHtml = html.substring(0, 20000);
+        
+        // 检查登录/退出按钮（限定在导航区域）
+        const loginPatterns = [
+          'href="/home/login"',
+          'class="login-btn"',
+          'href="https://www.oschina.net/home/login"',
+        ];
+        
+        const logoutPatterns = [
+          'href="/action/user/logout"',
+          'action/user/logout',
+        ];
+        
+        const hasLoginBtn = loginPatterns.some(p => headerHtml.includes(p));
+        const hasLogoutBtn = logoutPatterns.some(p => headerHtml.includes(p));
+        
+        // 从导航栏提取用户 ID（如果还没有）
+        let htmlUserId: string | undefined;
+        if (!cookieResult.userId) {
+          // 只匹配导航栏中的用户链接
+          const userIdMatch = headerHtml.match(/href=["'](?:https?:\/\/)?my\.oschina\.net\/u\/(\d+)["']/);
+          if (userIdMatch?.[1]) {
+            htmlUserId = userIdMatch[1];
+          }
+        }
+        
+        // 检查是否有用户下拉菜单（已登录标志）
+        const hasUserDropdown = headerHtml.includes('user-dropdown') || 
+                               headerHtml.includes('user-menu') ||
+                               headerHtml.includes('current-user');
+        
+        htmlResult = {
+          success: true,
+          hasLoginBtn,
+          hasLogoutBtn,
+          loggedIn: hasLogoutBtn || hasUserDropdown,
+          userInfo: htmlUserId ? { userId: htmlUserId } : undefined
+        };
+        
+        logger.info('oschina', 'HTML 解析结果', { 
+          hasLoginBtn, 
+          hasLogoutBtn, 
+          hasUserDropdown,
+          htmlUserId,
+          loggedIn: htmlResult.loggedIn
+        });
+      }
+    } catch (e: any) {
+      logger.warn('oschina', 'HTML 页面获取失败', { error: e.message });
+    }
+    
+    // 5. 综合判断登录状态
+    logger.info('oschina', '综合检测结果', {
+      cookie: { hasValid: cookieResult.hasValidCookie, userId: cookieResult.userId, noCookieAtAll: cookieResult.noCookieAtAll },
+      api: { success: apiResult.success, loggedIn: apiResult.loggedIn, hasUserInfo: !!apiResult.userInfo },
+      html: { success: htmlResult.success, loggedIn: htmlResult.loggedIn, hasLoginBtn: htmlResult.hasLoginBtn, hasLogoutBtn: htmlResult.hasLogoutBtn }
+    });
+    
+    // 情况1: API 或用户主页返回了用户信息
+    if (apiResult.success && apiResult.loggedIn && apiResult.userInfo) {
+      const userInfo = apiResult.userInfo;
+      return {
+        loggedIn: true,
+        platform: 'oschina',
+        userId: userInfo.userId,
+        // 只有在确实获取到昵称时才使用，否则使用默认值
+        nickname: userInfo.nickname || '开源中国用户',
+        // 只有在确实获取到头像时才使用
+        avatar: userInfo.avatar || undefined,
+        meta: userInfo.meta,
+        detectionMethod: 'api',
+      };
+    }
+    
+    // 情况2: HTML 检测成功且明确显示未登录（有登录按钮，无退出按钮）
+    if (htmlResult.success && htmlResult.hasLoginBtn && !htmlResult.hasLogoutBtn) {
+      logger.info('oschina', 'HTML 检测确认未登录');
+      return {
+        loggedIn: false,
+        platform: 'oschina',
+        errorType: AuthErrorType.LOGGED_OUT,
+        error: '需要登录',
+        retryable: false,
+      };
+    }
+    
+    // 情况3: API 明确返回未登录
+    if (apiResult.success && apiResult.loggedIn === false) {
+      logger.info('oschina', 'API 检测确认未登录');
+      return {
+        loggedIn: false,
+        platform: 'oschina',
+        errorType: AuthErrorType.LOGGED_OUT,
+        error: '需要登录',
+        retryable: false,
+      };
+    }
+    
+    // 情况4: HTML 检测确认已登录（有退出按钮或用户下拉菜单）
+    if (htmlResult.success && htmlResult.loggedIn) {
+      return {
+        loggedIn: true,
+        platform: 'oschina',
+        userId: cookieResult.userId || htmlResult.userInfo?.userId,
+        // 不从 HTML 提取昵称和头像，避免误抓
+        nickname: '开源中国用户',
+        avatar: undefined,
+        detectionMethod: 'html',
+      };
+    }
+    
+    // 情况5: Cookie 有效但 API/HTML 都无法确认
+    if (cookieResult.hasValidCookie) {
+      logger.info('oschina', 'Cookie 有效，判定为已登录');
+      return {
+        loggedIn: true,
+        platform: 'oschina',
+        userId: cookieResult.userId,
+        nickname: '开源中国用户',
+        detectionMethod: 'cookie',
+      };
+    }
+    
+    // 情况6: 完全没有 Cookie 且 HTML 检测成功但无登录标志，判定为未登录
+    if (cookieResult.noCookieAtAll && htmlResult.success) {
+      logger.info('oschina', '无 Cookie 且 HTML 无登录标志，判定为未登录');
+      return {
+        loggedIn: false,
+        platform: 'oschina',
+        errorType: AuthErrorType.LOGGED_OUT,
+        error: '需要登录',
+        retryable: false,
+      };
+    }
+    
+    // 情况7: 所有检测都失败或不确定，标记为可重试
+    logger.info('oschina', '所有检测方式都未能确认登录状态，标记为可重试');
+    return {
+      loggedIn: false,
+      platform: 'oschina',
+      errorType: AuthErrorType.API_ERROR,
+      error: '无法确认登录状态',
+      retryable: true,
+    };
   },
 };
 

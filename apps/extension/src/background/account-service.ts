@@ -876,6 +876,26 @@ export class AccountService {
         await db.accounts.put(updated);
         return updated;
       }
+
+      // 开源中国：检测结果不确定时保持原状态
+      // Background 检测已经包含 Cookie + API + HTML 三层检测，足够准确
+      // 只有在明确返回 LOGGED_OUT 时才会判定为失效
+      if (account.platform === 'oschina' && isRetryable) {
+        logger.info('refresh-account', '开源中国检测结果不确定，保持原状态', { 
+          error: userInfo.error,
+          currentStatus: account.status 
+        });
+
+        const updated: Account = {
+          ...account,
+          updatedAt: now,
+          lastCheckAt: now,
+          lastError: `[临时] ${userInfo.error || '检测异常'}`,
+        };
+
+        await db.accounts.put(updated);
+        return updated;
+      }
       
       // 新登录保护：如果在保护期内且错误可重试，保持 ACTIVE 状态
       if (isInProtectionPeriod && isRetryable) {
@@ -1084,6 +1104,27 @@ export class AccountService {
           // 51CTO：Cookie 结构/分区较容易导致误判，避免把“无法确认”当做失效打扰用户
           if (platform === '51cto' && isRetryable && account.status === AccountStatus.ACTIVE) {
             logger.info('refresh-all', '51CTO 检测结果不确定，保持 ACTIVE', { error: userInfo.error });
+
+            const updated: Account = {
+              ...account,
+              updatedAt: now,
+              lastCheckAt: now,
+              lastError: `[临时] ${userInfo.error || '检测异常'}`,
+            };
+
+            await db.accounts.put(updated);
+            success.push(updated);
+            continue;
+          }
+          
+          // 开源中国：检测结果不确定时保持原状态
+          // Background 检测已经包含 Cookie + API + HTML 三层检测，足够准确
+          // 只有在明确返回 LOGGED_OUT 时才会判定为失效
+          if (platform === 'oschina' && isRetryable) {
+            logger.info('refresh-all', '开源中国检测结果不确定，保持原状态', { 
+              error: userInfo.error,
+              currentStatus: account.status 
+            });
 
             const updated: Account = {
               ...account,
