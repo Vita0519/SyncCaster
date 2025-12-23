@@ -221,6 +221,10 @@ export interface Account {
   lastCheckAt?: number;             // 最后检测时间
   lastError?: string;               // 最后错误信息
   consecutiveFailures?: number;     // 连续失败次数
+  
+  // Cookie 过期时间管理（新增）
+  cookieExpiresAt?: number;         // Cookie 最早过期时间（毫秒时间戳）
+  needsLazyCheck?: boolean;         // 是否需要懒加载检测（用户选择时才检测）
 }
 
 /**

@@ -44,29 +44,90 @@
 
 5. **UI 改进**：区分显示真正失效和临时错误的账号
 
-### 问题三：账号失效后的管理与交互优化 📋 待实施
+### 问题三：启动时检测延迟 ✅ 已修复（v2.0）
 
-**建议方案**（已在文档中详细描述，可按需实施）：
+**根因**：启动时对所有账号调用 API 检测，导致明显的延迟。
 
-1. **账号状态模型扩展**：
-   ```typescript
-   enum AccountStatus {
-     ACTIVE = 'active',     // 正常
-     EXPIRED = 'expired',   // 已失效
-     CHECKING = 'checking', // 检测中
-     ERROR = 'error',       // 检测异常（临时）
-   }
-   ```
+**解决方案**：实现三层检测策略和懒加载机制：
 
-2. **UI 状态标记**：
-   - 失效账号显示红色标签
-   - 临时错误显示黄色标签
-   - 提供"重新登录"按钮
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Background Service                        │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐     │
+│  │ API 检测    │ →  │ Cookie 回退 │ →  │ 标签页检测  │     │
+│  │ (首选)      │    │ (备用)      │    │ (最后手段)  │     │
+│  └─────────────┘    └─────────────┘    └─────────────┘     │
+└─────────────────────────────────────────────────────────────┘
+```
 
-3. **重新登录流程**：
-   - 打开平台登录页面
-   - 轮询检测登录状态
-   - 登录成功后自动恢复账号状态
+1. **快速状态检测**：启动时只检测 Cookie 存在性，不调用 API
+2. **智能刷新策略**：根据缓存时间和 Cookie 状态决定是否刷新
+3. **懒加载检测**：用户选择平台时才进行完整检测
+
+---
+
+## v2.0 新增功能
+
+### 1. 快速状态检测
+
+启动时只检测 Cookie 存在性，不调用 API：
+
+```typescript
+// 快速检测 - 仅检测 Cookie
+const result = await AccountService.quickStatusCheck(account);
+// 返回: { hasValidCookies, isExpiringSoon, cookieExpiresAt }
+
+// 批量快速检测
+const results = await AccountService.quickStatusCheckAll(accounts);
+```
+
+### 2. 智能刷新策略
+
+根据以下条件决定是否需要刷新：
+
+1. 状态不是 ACTIVE
+2. Cookie 即将过期（24小时内）
+3. 距离上次检测超过 30 分钟
+4. Cookie 不存在
+
+```typescript
+// 判断是否需要刷新
+const { needsRefresh, reason } = await AccountService.shouldRefreshAccount(account, {
+  maxAge: 30 * 60 * 1000, // 30 分钟缓存
+});
+
+// 智能刷新 - 自动判断是否需要刷新
+const result = await AccountService.smartRefreshAccount(account, {
+  maxAge: 30 * 60 * 1000,
+});
+// 返回: { account, refreshed, reason }
+```
+
+### 3. 懒加载检测
+
+用户选择平台时才进行检测：
+
+```typescript
+// 懒加载检测 - 用户触发时才检测
+const result = await AccountService.lazyCheckAccount(account, forceCheck);
+// 返回: { needsRelogin, isExpiringSoon, account }
+```
+
+### 4. Cookie 过期预警
+
+- 检测 Cookie 最早过期时间
+- 24小时内过期显示"即将过期"标签
+- 提供"重新登录"按钮
+
+### 5. 新增消息类型
+
+| 消息类型 | 说明 |
+|----------|------|
+| `QUICK_STATUS_CHECK` | 快速状态检测 |
+| `QUICK_STATUS_CHECK_ALL` | 批量快速状态检测 |
+| `SHOULD_REFRESH_ACCOUNT` | 判断是否需要刷新 |
+| `SMART_REFRESH_ACCOUNT` | 智能刷新账号 |
 
 ---
 
@@ -85,10 +146,23 @@
 ### `apps/extension/src/background/account-service.ts`
 
 1. `refreshAllAccountsFast` 返回值新增 `errorType` 和 `retryable` 字段
+2. 新增 `quickStatusCheck` 快速状态检测方法
+3. 新增 `quickStatusCheckAll` 批量快速状态检测方法
+4. 新增 `shouldRefreshAccount` 判断是否需要刷新方法
+5. 新增 `smartRefreshAccount` 智能刷新方法
+
+### `apps/extension/src/background/index.ts`
+
+1. 新增 `QUICK_STATUS_CHECK` 消息处理
+2. 新增 `QUICK_STATUS_CHECK_ALL` 消息处理
+3. 新增 `SHOULD_REFRESH_ACCOUNT` 消息处理
+4. 新增 `SMART_REFRESH_ACCOUNT` 消息处理
 
 ### `apps/extension/src/ui/options/views/Accounts.vue`
 
 1. `refreshAllAccounts` 区分显示真正失效和临时错误的账号
+2. 新增 `quickStatusCheckOnStartup` 启动时快速检测
+3. 新增 `smartRefreshAccount` 智能刷新功能
 
 ---
 
@@ -103,6 +177,16 @@
    - 模拟 404 响应，确认不直接判定为登录失效
    - 真正登出后，确认显示为"登录已失效"
 
-3. **各平台测试**：
+3. **启动时检测测试**：
+   - 确认启动时不会调用 API
+   - 确认 Cookie 不存在时显示提示
+   - 确认 Cookie 即将过期时显示提示
+
+4. **智能刷新测试**：
+   - 确认 30 分钟内不会重复刷新
+   - 确认 Cookie 即将过期时会刷新
+   - 确认状态不是 ACTIVE 时会刷新
+
+5. **各平台测试**：
    - 逐一测试 12 个平台的登录检测
    - 确认 JSON 解析错误不再出现

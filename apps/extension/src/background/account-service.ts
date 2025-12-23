@@ -6,10 +6,13 @@
  * 2. background 只负责协调流程，不直接检测登录
  * 3. 通过消息机制获取登录状态
  * 4. 支持直接 API 调用快速刷新（无需打开标签页）
+ * 5. 懒加载检测机制（用户选择平台时才检测）
+ * 6. Cookie 过期时间管理
+ * 7. 登录失效时自动打开登录页
  */
 import { db, type Account, AccountStatus } from '@synccaster/core';
 import { Logger } from '@synccaster/utils';
-import { fetchPlatformUserInfo, fetchMultiplePlatformUserInfo, supportDirectApi, type UserInfo, AuthErrorType } from './platform-api';
+import { fetchPlatformUserInfo, fetchMultiplePlatformUserInfo, supportDirectApi, getPlatformCookieExpiration, type UserInfo, AuthErrorType } from './platform-api';
 
 const logger = new Logger('account-service');
 
@@ -277,13 +280,14 @@ async function findPlatformTab(platform: string): Promise<chrome.tabs.Tab | null
   return null;
 }
 
-const PROFILE_ENRICH_PLATFORMS = new Set(['wechat', 'tencent-cloud', 'jianshu', 'csdn', '51cto']);
+const PROFILE_ENRICH_PLATFORMS = new Set(['wechat', 'tencent-cloud', 'jianshu', 'csdn', '51cto', 'segmentfault']);
 const GENERIC_NICKNAMES: Record<string, string[]> = {
   wechat: ['微信公众号'],
   'tencent-cloud': ['腾讯云用户'],
   jianshu: ['简书用户'],
   csdn: ['CSDN用户'],
   '51cto': ['51CTO用户'],
+  segmentfault: ['思否用户'],
 };
 
 function isGenericNickname(platform: string, nickname?: string): boolean {
@@ -383,6 +387,15 @@ export class AccountService {
       const slug = String((account.meta as any)?.profileId || extractUserIdFromAccountId(account) || '').trim();
       if (slug && !/^\d+$/.test(slug) && !slug.startsWith('jianshu_')) {
         return `https://www.jianshu.com/u/${slug}`;
+      }
+      return config.homeUrl;
+    }
+
+    if (account.platform === 'segmentfault') {
+      // 思否用户主页格式：https://segmentfault.com/u/{slug}
+      const slug = String((account.meta as any)?.profileId || extractUserIdFromAccountId(account) || '').trim();
+      if (slug && slug.length > 0 && !slug.startsWith('segmentfault_')) {
+        return `https://segmentfault.com/u/${slug}`;
       }
       return config.homeUrl;
     }
@@ -1320,7 +1333,467 @@ export class AccountService {
       setTimeout(poll, 2000);
     });
   }
+  
+  // ============================================================
+  // 懒加载检测机制
+  // ============================================================
+  
+  /**
+   * 快速状态检测（仅检测 Cookie 存在性，不调用 API）
+   * 
+   * 用于启动时快速判断账号状态，避免大量 API 调用。
+   * 只检测 Cookie 是否存在，不验证 Cookie 是否有效。
+   * 
+   * @param account - 需要检测的账号
+   * @returns 快速检测结果
+   */
+  static async quickStatusCheck(account: Account): Promise<{
+    hasValidCookies: boolean;
+    isExpiringSoon: boolean;
+    cookieExpiresAt?: number;
+  }> {
+    const cookieInfo = await getPlatformCookieExpiration(account.platform);
+    
+    logger.debug('quick-check', `${account.platform} Cookie 检测`, {
+      hasValidCookies: cookieInfo.hasValidCookies,
+      isExpiringSoon: cookieInfo.isExpiringSoon,
+    });
+    
+    return {
+      hasValidCookies: cookieInfo.hasValidCookies,
+      isExpiringSoon: cookieInfo.isExpiringSoon || false,
+      cookieExpiresAt: cookieInfo.cookieExpiresAt,
+    };
+  }
+  
+  /**
+   * 批量快速状态检测
+   * 
+   * 启动时使用，快速判断所有账号的 Cookie 状态。
+   * 不调用 API，只检测 Cookie 存在性。
+   * 
+   * @param accounts - 账号列表
+   * @returns 检测结果映射
+   */
+  static async quickStatusCheckAll(accounts: Account[]): Promise<Map<string, {
+    hasValidCookies: boolean;
+    isExpiringSoon: boolean;
+    cookieExpiresAt?: number;
+  }>> {
+    logger.info('quick-check-all', `批量快速检测 ${accounts.length} 个账号`);
+    
+    const results = new Map<string, {
+      hasValidCookies: boolean;
+      isExpiringSoon: boolean;
+      cookieExpiresAt?: number;
+    }>();
+    
+    // 并行检测所有账号
+    const checkResults = await Promise.all(
+      accounts.map(async (account) => {
+        const result = await this.quickStatusCheck(account);
+        return { accountId: account.id, result };
+      })
+    );
+    
+    for (const { accountId, result } of checkResults) {
+      results.set(accountId, result);
+    }
+    
+    // 统计结果
+    const validCount = Array.from(results.values()).filter(r => r.hasValidCookies).length;
+    const expiringSoonCount = Array.from(results.values()).filter(r => r.isExpiringSoon).length;
+    
+    logger.info('quick-check-all', `检测完成`, {
+      total: accounts.length,
+      valid: validCount,
+      expiringSoon: expiringSoonCount,
+      invalid: accounts.length - validCount,
+    });
+    
+    return results;
+  }
+  
+  /**
+   * 判断账号是否需要刷新
+   * 
+   * 基于以下条件判断：
+   * 1. 状态不是 ACTIVE
+   * 2. Cookie 即将过期
+   * 3. 距离上次检测超过指定时间
+   * 4. Cookie 不存在
+   * 
+   * @param account - 账号
+   * @param options - 选项
+   * @returns 是否需要刷新
+   */
+  static async shouldRefreshAccount(account: Account, options: {
+    maxAge?: number;  // 最大缓存时间（毫秒），默认 30 分钟
+    checkCookie?: boolean;  // 是否检测 Cookie，默认 true
+  } = {}): Promise<{
+    needsRefresh: boolean;
+    reason?: string;
+  }> {
+    const { maxAge = 30 * 60 * 1000, checkCookie = true } = options;
+    const now = Date.now();
+    
+    // 1. 状态不是 ACTIVE，需要刷新
+    if (account.status !== AccountStatus.ACTIVE) {
+      return { needsRefresh: true, reason: `状态为 ${account.status}` };
+    }
+    
+    // 2. 距离上次检测超过最大缓存时间
+    if (account.lastCheckAt) {
+      const timeSinceLastCheck = now - account.lastCheckAt;
+      if (timeSinceLastCheck > maxAge) {
+        return { needsRefresh: true, reason: `距离上次检测已超过 ${Math.round(maxAge / 60000)} 分钟` };
+      }
+    } else {
+      // 从未检测过
+      return { needsRefresh: true, reason: '从未检测过' };
+    }
+    
+    // 3. 检测 Cookie 状态
+    if (checkCookie) {
+      const cookieInfo = await getPlatformCookieExpiration(account.platform);
+      
+      if (!cookieInfo.hasValidCookies) {
+        return { needsRefresh: true, reason: 'Cookie 不存在或已失效' };
+      }
+      
+      if (cookieInfo.isExpiringSoon) {
+        return { needsRefresh: true, reason: 'Cookie 即将过期' };
+      }
+    }
+    
+    return { needsRefresh: false };
+  }
+  
+  /**
+   * 智能刷新账号
+   * 
+   * 根据 shouldRefreshAccount 的结果决定是否刷新。
+   * 如果不需要刷新，直接返回缓存的账号信息。
+   * 
+   * @param account - 账号
+   * @param options - 选项
+   * @returns 账号信息（可能是缓存的）
+   */
+  static async smartRefreshAccount(account: Account, options: {
+    maxAge?: number;
+    forceRefresh?: boolean;
+  } = {}): Promise<{
+    account: Account;
+    refreshed: boolean;
+    reason?: string;
+  }> {
+    const { forceRefresh = false } = options;
+    
+    // 强制刷新
+    if (forceRefresh) {
+      const updated = await this.refreshAccount(account);
+      return { account: updated, refreshed: true, reason: '强制刷新' };
+    }
+    
+    // 判断是否需要刷新
+    const { needsRefresh, reason } = await this.shouldRefreshAccount(account, options);
+    
+    if (!needsRefresh) {
+      logger.debug('smart-refresh', `${account.platform} 无需刷新`, { reason: '缓存有效' });
+      return { account, refreshed: false };
+    }
+    
+    logger.info('smart-refresh', `${account.platform} 需要刷新`, { reason });
+    
+    try {
+      const updated = await this.refreshAccount(account);
+      return { account: updated, refreshed: true, reason };
+    } catch (e: any) {
+      // 刷新失败，返回原账号（状态可能已更新）
+      const updatedAccount = await db.accounts.get(account.id) || account;
+      return { account: updatedAccount, refreshed: true, reason: `刷新失败: ${e.message}` };
+    }
+  }
+  
+  /**
+   * 懒加载检测账号状态
+   * 
+   * 用户选择平台时才进行检测，而不是主动轮询。
+   * 优先使用 Cookie 过期时间判断，避免不必要的 API 调用。
+   * 
+   * 检测策略：
+   * 1. 如果 Cookie 未过期且距离上次检测不超过 30 分钟，跳过检测
+   * 2. 如果 Cookie 即将过期（24小时内），标记需要重新登录
+   * 3. 否则进行完整的 API 检测
+   * 
+   * @param account - 需要检测的账号
+   * @param forceCheck - 是否强制检测（忽略缓存）
+   * @returns 检测结果
+   */
+  static async lazyCheckAccount(account: Account, forceCheck = false): Promise<{
+    needsRelogin: boolean;
+    isExpiringSoon: boolean;
+    account: Account;
+  }> {
+    const now = Date.now();
+    const CACHE_DURATION = 30 * 60 * 1000; // 30 分钟缓存
+    
+    logger.info('lazy-check', `懒加载检测: ${account.platform}`, { forceCheck });
+    
+    // 1. 检查是否可以使用缓存
+    if (!forceCheck && account.lastCheckAt) {
+      const timeSinceLastCheck = now - account.lastCheckAt;
+      
+      // 如果状态是 ACTIVE 且在缓存期内，检查 Cookie 过期时间
+      if (account.status === AccountStatus.ACTIVE && timeSinceLastCheck < CACHE_DURATION) {
+        // 检查 Cookie 是否即将过期
+        const cookieInfo = await getPlatformCookieExpiration(account.platform);
+        
+        if (cookieInfo.hasValidCookies) {
+          if (cookieInfo.isExpiringSoon) {
+            logger.info('lazy-check', `${account.platform} Cookie 即将过期，建议重新登录`);
+            return {
+              needsRelogin: false,
+              isExpiringSoon: true,
+              account,
+            };
+          }
+          
+          // Cookie 有效且未过期，使用缓存
+          logger.info('lazy-check', `${account.platform} 使用缓存，跳过检测`);
+          return {
+            needsRelogin: false,
+            isExpiringSoon: false,
+            account,
+          };
+        }
+      }
+    }
+    
+    // 2. 进行完整检测
+    try {
+      const updated = await this.refreshAccount(account);
+      
+      // 更新 Cookie 过期时间
+      const cookieInfo = await getPlatformCookieExpiration(account.platform);
+      if (cookieInfo.cookieExpiresAt) {
+        await db.accounts.update(account.id, {
+          cookieExpiresAt: cookieInfo.cookieExpiresAt,
+        });
+      }
+      
+      return {
+        needsRelogin: false,
+        isExpiringSoon: cookieInfo.isExpiringSoon || false,
+        account: updated,
+      };
+    } catch (e: any) {
+      // 检测失败，判断是否需要重新登录
+      const needsRelogin = (e as any).errorType === AuthErrorType.LOGGED_OUT || 
+                           (e as any).retryable === false;
+      
+      // 重新获取更新后的账号
+      const updatedAccount = await db.accounts.get(account.id) || account;
+      
+      return {
+        needsRelogin,
+        isExpiringSoon: false,
+        account: updatedAccount,
+      };
+    }
+  }
+  
+  /**
+   * 批量懒加载检测
+   * 
+   * 对多个账号进行懒加载检测，返回需要重新登录的账号列表。
+   * 
+   * @param accounts - 需要检测的账号列表
+   * @returns 检测结果
+   */
+  static async lazyCheckAccounts(accounts: Account[]): Promise<{
+    valid: Account[];
+    needsRelogin: Account[];
+    expiringSoon: Account[];
+  }> {
+    const valid: Account[] = [];
+    const needsRelogin: Account[] = [];
+    const expiringSoon: Account[] = [];
+    
+    // 并行检测所有账号
+    const results = await Promise.all(
+      accounts.map(account => this.lazyCheckAccount(account))
+    );
+    
+    for (const result of results) {
+      if (result.needsRelogin) {
+        needsRelogin.push(result.account);
+      } else if (result.isExpiringSoon) {
+        expiringSoon.push(result.account);
+      } else {
+        valid.push(result.account);
+      }
+    }
+    
+    logger.info('lazy-check-batch', `批量检测完成`, {
+      valid: valid.length,
+      needsRelogin: needsRelogin.length,
+      expiringSoon: expiringSoon.length,
+    });
+    
+    return { valid, needsRelogin, expiringSoon };
+  }
+  
+  // ============================================================
+  // 自动打开登录页
+  // ============================================================
+  
+  /**
+   * 自动打开平台登录页
+   * 
+   * 当检测到账号登录失效时，自动打开平台登录页面。
+   * 用户完成登录后，系统会自动检测并更新账号状态。
+   * 
+   * @param account - 需要重新登录的账号
+   * @param options - 选项
+   * @returns 是否成功打开登录页
+   */
+  static async autoOpenLoginPage(account: Account, options: {
+    active?: boolean;  // 是否激活标签页（默认 true）
+    waitForLogin?: boolean;  // 是否等待登录完成（默认 false）
+  } = {}): Promise<{ success: boolean; tabId?: number }> {
+    const { active = true, waitForLogin = false } = options;
+    const config = PLATFORMS[account.platform];
+    
+    if (!config) {
+      logger.warn('auto-login', `不支持的平台: ${account.platform}`);
+      return { success: false };
+    }
+    
+    logger.info('auto-login', `自动打开登录页: ${config.name}`, { accountId: account.id });
+    
+    try {
+      const tab = await chrome.tabs.create({ 
+        url: config.loginUrl, 
+        active 
+      });
+      
+      if (!tab.id) {
+        return { success: false };
+      }
+      
+      if (waitForLogin) {
+        // 等待登录完成（复用 reloginAccount 的逻辑）
+        try {
+          await this.reloginAccount(account);
+          return { success: true, tabId: tab.id };
+        } catch (e) {
+          return { success: false, tabId: tab.id };
+        }
+      }
+      
+      return { success: true, tabId: tab.id };
+    } catch (e: any) {
+      logger.error('auto-login', `打开登录页失败: ${e.message}`);
+      return { success: false };
+    }
+  }
+  
+  // ============================================================
+  // 手动发布降级
+  // ============================================================
+  
+  /**
+   * 获取平台手动发布 URL
+   * 
+   * 当 API 完全不可用时，提供手动发布的降级方案。
+   * 
+   * @param platform - 平台标识
+   * @returns 手动发布 URL
+   */
+  static getManualPublishUrl(platform: string): string | null {
+    const MANUAL_PUBLISH_URLS: Record<string, string> = {
+      'juejin': 'https://juejin.cn/editor/drafts/new',
+      'csdn': 'https://editor.csdn.net/md',
+      'zhihu': 'https://zhuanlan.zhihu.com/write',
+      'wechat': 'https://mp.weixin.qq.com/',
+      'jianshu': 'https://www.jianshu.com/writer',
+      'cnblogs': 'https://i.cnblogs.com/posts/edit',
+      '51cto': 'https://blog.51cto.com/blogger/publish',
+      'tencent-cloud': 'https://cloud.tencent.com/developer/article/write',
+      'aliyun': 'https://developer.aliyun.com/article/new',
+      'segmentfault': 'https://segmentfault.com/write',
+      'bilibili': 'https://member.bilibili.com/platform/upload/text/edit',
+      'oschina': 'https://my.oschina.net/u/home/publish',
+    };
+    
+    return MANUAL_PUBLISH_URLS[platform] || null;
+  }
+  
+  /**
+   * 打开手动发布页面
+   * 
+   * @param platform - 平台标识
+   * @returns 是否成功打开
+   */
+  static async openManualPublishPage(platform: string): Promise<boolean> {
+    const url = this.getManualPublishUrl(platform);
+    
+    if (!url) {
+      logger.warn('manual-publish', `平台 ${platform} 不支持手动发布`);
+      return false;
+    }
+    
+    try {
+      await chrome.tabs.create({ url, active: true });
+      logger.info('manual-publish', `已打开 ${platform} 手动发布页面`);
+      return true;
+    } catch (e: any) {
+      logger.error('manual-publish', `打开手动发布页面失败: ${e.message}`);
+      return false;
+    }
+  }
+  
+  /**
+   * 检查账号是否需要重新登录
+   * 
+   * 基于 Cookie 过期时间和账号状态判断。
+   * 
+   * @param account - 账号
+   * @returns 是否需要重新登录
+   */
+  static isAccountExpiredOrExpiring(account: Account): {
+    isExpired: boolean;
+    isExpiringSoon: boolean;
+    expiresIn?: number;  // 距离过期的毫秒数
+  } {
+    const now = Date.now();
+    const EXPIRING_SOON_THRESHOLD = 24 * 60 * 60 * 1000; // 24小时
+    
+    // 状态已经是 EXPIRED
+    if (account.status === AccountStatus.EXPIRED) {
+      return { isExpired: true, isExpiringSoon: false };
+    }
+    
+    // 检查 Cookie 过期时间
+    if (account.cookieExpiresAt) {
+      const expiresIn = account.cookieExpiresAt - now;
+      
+      if (expiresIn <= 0) {
+        return { isExpired: true, isExpiringSoon: false, expiresIn: 0 };
+      }
+      
+      if (expiresIn < EXPIRING_SOON_THRESHOLD) {
+        return { isExpired: false, isExpiringSoon: true, expiresIn };
+      }
+    }
+    
+    return { isExpired: false, isExpiringSoon: false };
+  }
 }
+
+// 导出平台配置供外部使用
+export { PLATFORMS, PLATFORM_NAMES };
 
 // 导出用于兼容旧代码
 export const AUTH_CHECKERS = {};

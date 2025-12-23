@@ -143,12 +143,28 @@
         </div>
       </div>
     </Teleport>
+
+    <!-- 未保存修改确认弹窗 -->
+    <Teleport to="body">
+      <div v-if="showUnsavedDialog" class="modal-overlay" @click.self="handleCancelLeave">
+        <div class="unsaved-dialog" @click.stop @keydown.enter="handleSaveAndLeave" @keydown.escape="handleCancelLeave">
+          <div class="unsaved-dialog-icon">📝</div>
+          <div class="unsaved-dialog-title">文章尚未保存</div>
+          <div class="unsaved-dialog-message">是否保存当前修改？</div>
+          <div class="unsaved-dialog-actions">
+            <button class="unsaved-btn unsaved-btn-primary" @click="handleSaveAndLeave" autofocus>是（保存）</button>
+            <button class="unsaved-btn unsaved-btn-secondary" @click="handleDiscardAndLeave">否（不保存）</button>
+            <button class="unsaved-btn unsaved-btn-cancel" @click="handleCancelLeave">取消</button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useMessage } from 'naive-ui';
 import { db, type Account, ChromeStorageBridge, type SyncCasterArticle, AccountStatus } from '@synccaster/core';
 import { renderMarkdownPreview } from '../utils/markdown-preview';
@@ -175,6 +191,15 @@ const selectedAccounts = ref<string[]>([]);
 
 const editorRef = ref<HTMLTextAreaElement | null>(null);
 const previewRef = ref<HTMLDivElement | null>(null);
+
+// 未保存修改状态追踪
+const savedTitle = ref('');
+const savedBody = ref('');
+const hasUnsavedChanges = computed(() => title.value !== savedTitle.value || body.value !== savedBody.value);
+
+// 保存确认弹窗
+const showUnsavedDialog = ref(false);
+const pendingNavigation = ref<string | null>(null);
 
 // 可调整的尺寸
 const editorHeight = ref(420);
@@ -327,13 +352,24 @@ async function load() {
   try {
     const pid = parseIdFromHash();
     id.value = pid;
-    if (pid === 'new' || !pid) { title.value = ''; body.value = ''; sourceUrl.value = ''; loading.value = false; return; }
+    if (pid === 'new' || !pid) { 
+      title.value = ''; 
+      body.value = ''; 
+      sourceUrl.value = ''; 
+      savedTitle.value = '';
+      savedBody.value = '';
+      loading.value = false; 
+      return; 
+    }
     const post = await db.posts.get(pid);
     if (!post) { notFound.value = true; return; }
     title.value = post.title || '';
     body.value = post.body_md || '';
     sourceUrl.value = post.url || post.canonicalUrl || '';
     images.value = Array.isArray(post.assets) ? post.assets.filter((a: any) => a.type === 'image') : [];
+    // 记录保存状态
+    savedTitle.value = title.value;
+    savedBody.value = body.value;
   } finally { loading.value = false; }
 }
 
@@ -347,21 +383,65 @@ function showValidationError(msg: string) {
 }
 
 async function save() {
-  if (!title.value.trim()) { showValidationError('请输入文章标题'); return; }
-  if (!body.value.trim()) { showValidationError('请输入文章正文'); return; }
+  if (!title.value.trim()) { showValidationError('请输入文章标题'); return false; }
+  if (!body.value.trim()) { showValidationError('请输入文章正文'); return false; }
   if (!id.value || id.value === 'new') {
     const now = Date.now();
     const newId = crypto.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2, 8)}`;
     await db.posts.add({ id: newId, version: 1, title: title.value, summary: body.value.slice(0, 200), canonicalUrl: '', createdAt: now, updatedAt: now, body_md: body.value, tags: [], categories: [], assets: [], meta: {} } as any);
     window.location.hash = `editor/${newId}`;
+    savedTitle.value = title.value;
+    savedBody.value = body.value;
     showCopySuccess('文章已保存');
-    return;
+    return true;
   }
   await db.posts.update(id.value, { title: title.value, body_md: body.value, summary: body.value.slice(0, 200), updatedAt: Date.now() } as any);
+  savedTitle.value = title.value;
+  savedBody.value = body.value;
   showCopySuccess('文章已保存');
+  return true;
 }
 
-function goBack() { window.location.hash = 'posts'; }
+function goBack() {
+  if (hasUnsavedChanges.value) {
+    pendingNavigation.value = 'posts';
+    showUnsavedDialog.value = true;
+  } else {
+    window.location.hash = 'posts';
+  }
+}
+
+// 未保存确认弹窗操作
+async function handleSaveAndLeave() {
+  const success = await save();
+  if (success && pendingNavigation.value) {
+    showUnsavedDialog.value = false;
+    window.location.hash = pendingNavigation.value;
+    pendingNavigation.value = null;
+  }
+}
+
+function handleDiscardAndLeave() {
+  showUnsavedDialog.value = false;
+  if (pendingNavigation.value) {
+    window.location.hash = pendingNavigation.value;
+    pendingNavigation.value = null;
+  }
+}
+
+function handleCancelLeave() {
+  showUnsavedDialog.value = false;
+  pendingNavigation.value = null;
+}
+
+// 浏览器关闭/刷新提示
+function handleBeforeUnload(e: BeforeUnloadEvent) {
+  if (hasUnsavedChanges.value) {
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  }
+}
 
 async function loadEnabledAccounts() {
   try { const all = await db.accounts.toArray(); enabledAccounts.value = all.filter(a => a.enabled === true); }
@@ -451,8 +531,8 @@ function setupStorageListener() {
   } catch {}
 }
 
-onMounted(() => { load(); document.addEventListener('visibilitychange', handleVisibilityChange); setupStorageListener(); });
-onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisibilityChange); if (unsubscribeStorageChange) unsubscribeStorageChange(); if (rafId) cancelAnimationFrame(rafId); });
+onMounted(() => { load(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('beforeunload', handleBeforeUnload); setupStorageListener(); });
+onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('beforeunload', handleBeforeUnload); if (unsubscribeStorageChange) unsubscribeStorageChange(); if (rafId) cancelAnimationFrame(rafId); });
 </script>
 
 
@@ -503,10 +583,13 @@ onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisib
 .copy-link { font-size: 11px; color: #3b82f6; background: none; border: none; cursor: pointer; padding: 2px 6px; border-radius: 4px; transition: background 0.2s; }
 .copy-link:hover { background: rgba(59, 130, 246, 0.1); }
 
-.pane-body { flex: 1; overflow: auto; min-height: 0; }
-.editor-textarea { width: 100%; height: 100%; padding: 12px; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace; font-size: 13px; line-height: 1.6; border: none; outline: none; resize: none; background: transparent; color: #1f2937; }
+.pane-body { flex: 1; overflow: hidden; min-height: 0; position: relative; }
+.editor-textarea { width: 100%; height: 100%; padding: 12px; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace; font-size: 13px; line-height: 1.6; border: none; outline: none; resize: none; background: transparent; color: #1f2937; overflow-y: auto; box-sizing: border-box; }
 .editor-textarea.dark { color: #e5e7eb; }
 .editor-textarea::placeholder { color: #9ca3af; }
+
+/* 预览区域滚动 */
+.preview-pane .pane-body { overflow-y: auto; }
 
 /* 分割线 - 可拖拽 */
 .divider { width: 6px; background: #e5e7eb; flex-shrink: 0; cursor: col-resize; position: relative; transition: background 0.2s; }
@@ -582,9 +665,28 @@ onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisib
 .markdown-preview.dark thead th { background: #374151; }
 .markdown-preview.dark th, .markdown-preview.dark td { border-bottom-color: #374151; }
 
-/* 滚动条 */
-.pane-body::-webkit-scrollbar, .editor-textarea::-webkit-scrollbar { width: 6px; }
-.pane-body::-webkit-scrollbar-track, .editor-textarea::-webkit-scrollbar-track { background: transparent; }
-.pane-body::-webkit-scrollbar-thumb, .editor-textarea::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; }
+/* 滚动条统一样式 */
+.pane-body::-webkit-scrollbar, .editor-textarea::-webkit-scrollbar { width: 6px; height: 6px; }
+.pane-body::-webkit-scrollbar-track, .editor-textarea::-webkit-scrollbar-track { background: transparent; border-radius: 3px; }
+.pane-body::-webkit-scrollbar-thumb, .editor-textarea::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 3px; min-height: 30px; }
 .pane-body::-webkit-scrollbar-thumb:hover, .editor-textarea::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+.editor-pane.dark .editor-textarea::-webkit-scrollbar-thumb { background: #4b5563; }
+.editor-pane.dark .editor-textarea::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+.preview-pane.dark .pane-body::-webkit-scrollbar-thumb { background: #4b5563; }
+.preview-pane.dark .pane-body::-webkit-scrollbar-thumb:hover { background: #6b7280; }
+
+/* 未保存确认弹窗 */
+.unsaved-dialog { background: white; border-radius: 12px; padding: 24px; width: 100%; max-width: 320px; text-align: center; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.2); }
+.unsaved-dialog-icon { font-size: 36px; margin-bottom: 12px; }
+.unsaved-dialog-title { font-size: 16px; font-weight: 600; color: #1f2937; margin-bottom: 8px; }
+.unsaved-dialog-message { font-size: 13px; color: #6b7280; margin-bottom: 20px; }
+.unsaved-dialog-actions { display: flex; flex-direction: column; gap: 8px; }
+.unsaved-btn { padding: 10px 16px; font-size: 13px; font-weight: 500; border: none; border-radius: 8px; cursor: pointer; transition: all 0.2s; outline: none; }
+.unsaved-btn:focus { box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3); }
+.unsaved-btn-primary { background: #3b82f6; color: white; }
+.unsaved-btn-primary:hover { background: #2563eb; }
+.unsaved-btn-secondary { background: #f3f4f6; color: #374151; }
+.unsaved-btn-secondary:hover { background: #e5e7eb; }
+.unsaved-btn-cancel { background: transparent; color: #9ca3af; }
+.unsaved-btn-cancel:hover { color: #6b7280; background: #f9fafb; }
 </style>

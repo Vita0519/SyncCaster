@@ -1,195 +1,127 @@
 <template>
-  <div>
-    <div class="flex-between mb-6">
-      <h2 class="text-2xl font-bold" :class="isDark ? 'text-gray-100' : 'text-gray-800'">账号管理</h2>
-      <div class="flex gap-2">
-        <n-button :loading="refreshingAll" :disabled="accounts.length === 0" @click="refreshAllAccounts">
-          🔄 一键刷新全部
-        </n-button>
-        <n-button type="primary" @click="showAddDialog = true">
-          ➕ 添加账号
+  <div class="accounts-page">
+    <h2 class="page-title" :class="isDark ? 'text-gray-100' : 'text-gray-800'">账号管理</h2>
+
+    <!-- 已绑定账号模块 -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-header-left">
+          <span class="section-title">已绑定账号</span>
+          <span class="section-count">{{ accounts.length }}</span>
+        </div>
+        <n-button 
+          v-if="accounts.length > 0"
+          size="small" 
+          quaternary
+          :loading="refreshingAll"
+          @click="refreshAllAccounts"
+        >
+          刷新
         </n-button>
       </div>
-    </div>
-
-    <!-- 账号列表 -->
-    <n-card title="已绑定账号">
-      <n-empty v-if="accounts.length === 0" description="暂无绑定账号" />
-      <n-list v-else>
-        <n-list-item v-for="account in accounts" :key="account.id">
-          <template #prefix>
-            <!-- 7.2: Add warning badge on avatar for expired accounts -->
-            <n-badge :show="account.status === 'expired'" dot type="error" :offset="[-2, 2]">
-              <n-avatar :src="account.avatar" :fallback-src="`https://api.dicebear.com/7.x/avataaars/svg?seed=${account.nickname}`" />
-            </n-badge>
-          </template>
-          <n-thing>
-            <template #header>
-              <span 
-                class="cursor-pointer hover:text-blue-500 hover:underline transition-colors"
-                @click="goToUserProfile(account)"
-                :title="`点击访问 ${account.nickname} 的主页`"
-              >
-                {{ account.nickname }}
-              </span>
-            </template>
-            <template #description>
-              <n-space>
-                <n-tag 
-                  type="info" 
-                  size="small" 
-                  class="cursor-pointer hover:opacity-80"
-                  @click="goToUserProfile(account)"
-                  :title="`点击访问 ${getPlatformName(account.platform)}`"
-                >
-                  {{ getPlatformName(account.platform) }}
-                </n-tag>
-                <n-tag v-if="account.meta?.level" type="success" size="small">
-                  Lv{{ account.meta.level }}
-                </n-tag>
-                <!-- 7.1: Status tag display logic -->
-                <n-tooltip v-if="account.status === 'expired'" trigger="hover">
-                  <template #trigger>
-                    <n-tag type="error" size="small">已失效</n-tag>
-                  </template>
-                  {{ account.lastError || '账号登录已失效，请重新登录' }}
-                </n-tooltip>
-                <n-tooltip v-else-if="account.status === 'error'" trigger="hover">
-                  <template #trigger>
-                    <n-tag type="warning" size="small">检测异常</n-tag>
-                  </template>
-                  {{ account.lastError || '检测异常，可能是临时问题' }}
-                </n-tooltip>
-                <n-spin v-else-if="account.status === 'checking'" :size="12" />
-              </n-space>
-            </template>
-            <template #footer>
-              <n-space vertical size="small">
-                <!-- Account meta info -->
-                <n-space v-if="account.meta" size="small" class="text-xs text-gray-500">
-                  <span v-if="account.meta.followersCount">粉丝: {{ formatCount(account.meta.followersCount) }}</span>
-                  <span v-if="account.meta.articlesCount">文章: {{ formatCount(account.meta.articlesCount) }}</span>
-                  <span v-if="account.meta.viewsCount">阅读: {{ formatCount(account.meta.viewsCount) }}</span>
-                </n-space>
-                <!-- 7.5: Display lastError in account footer -->
-                <div 
-                  v-if="account.lastError && (account.status === 'expired' || account.status === 'error')" 
-                  class="text-xs"
-                  :class="account.status === 'expired' ? 'text-red-500' : 'text-yellow-600'"
-                >
-                  {{ account.lastError }}
-                </div>
-              </n-space>
-            </template>
-          </n-thing>
-          <template #suffix>
-            <n-space vertical size="small" align="end">
-              <!-- 7.3: Conditional re-login button -->
-              <n-button 
-                v-if="account.status === 'expired'" 
-                type="warning" 
-                size="small"
-                secondary
-                :loading="reloginLoadingMap[account.id]"
-                @click="reloginAccount(account)"
-              >
-                🔑 重新登录
-              </n-button>
-              <n-button 
-                v-else 
-                type="primary" 
-                size="small"
-                secondary
-                @click="refreshAccount(account)"
-              >
-                🔄 刷新
-              </n-button>
-              <n-button 
-                type="error" 
-                size="small"
-                quaternary
-                @click="deleteAccount(account)"
-              >
-                🗑️ 删除
-              </n-button>
-            </n-space>
-          </template>
-        </n-list-item>
-      </n-list>
-    </n-card>
-
-    <!-- 添加账号对话框 -->
-    <n-modal v-model:show="showAddDialog" preset="dialog" title="添加账号">
-      <n-space vertical size="large">
-        <div>
-          <div class="text-sm text-gray-600 mb-3">选择平台</div>
-          <n-radio-group v-model:value="selectedPlatform">
-            <n-space vertical>
-              <n-radio v-for="platform in platforms" :key="platform.id" :value="platform.id">
-                <n-space align="center">
-                  <span class="text-lg">{{ platform.icon }}</span>
-                  <span>{{ platform.name }}</span>
-                </n-space>
-              </n-radio>
-            </n-space>
-          </n-radio-group>
+      
+      <div v-if="accounts.length === 0" class="empty-state">
+        暂无绑定账号，请在下方选择平台登录
+      </div>
+      
+      <div v-else class="account-grid">
+        <div 
+          v-for="account in accounts" 
+          :key="account.id"
+          class="account-row"
+        >
+          <div class="account-left">
+            <n-avatar 
+              :size="32"
+              :src="account.avatar" 
+              :fallback-src="`https://api.dicebear.com/7.x/avataaars/svg?seed=${account.nickname}`" 
+            />
+            <span 
+              class="account-name"
+              @click="goToUserProfile(account)"
+              :title="`访问 ${account.nickname} 的主页`"
+            >
+              {{ account.nickname }}
+            </span>
+            <n-tag size="small" :bordered="false">
+              {{ getPlatformName(account.platform) }}
+            </n-tag>
+          </div>
+          
+          <div class="account-right">
+            <n-tooltip v-if="account.status === 'expired'" trigger="hover">
+              <template #trigger>
+                <span class="status-dot status-error"></span>
+              </template>
+              {{ account.lastError || '登录已失效，请重新登录' }}
+            </n-tooltip>
+            <n-tooltip v-else-if="isAccountExpiringSoon(account)" trigger="hover">
+              <template #trigger>
+                <span class="status-dot status-warning"></span>
+              </template>
+              登录将在 {{ formatExpiresIn(account.cookieExpiresAt) }} 后过期
+            </n-tooltip>
+            <span v-else class="status-dot status-success"></span>
+            
+            <n-button 
+              v-if="account.status === 'expired' || isAccountExpiringSoon(account)" 
+              size="small"
+              :loading="reloginLoadingMap[account.id]"
+              @click="reloginAccount(account)"
+            >
+              重新登录
+            </n-button>
+          </div>
         </div>
+      </div>
+    </section>
 
-        <n-alert v-if="selectedPlatform" type="info">
-          <template #header>添加方式</template>
-          <n-space vertical>
-            <p><strong>方式一：引导登录</strong></p>
-            <p class="text-sm">系统会打开 {{ getPlatformName(selectedPlatform) }} 登录页面，登录后自动获取账号信息。</p>
-            <p><strong>方式二：快速添加</strong></p>
-            <p class="text-sm">如果你已在浏览器中登录 {{ getPlatformName(selectedPlatform) }}，可以直接添加。</p>
-          </n-space>
-        </n-alert>
-      </n-space>
-
-      <template #action>
-        <n-space>
-          <n-button @click="showAddDialog = false">取消</n-button>
-          <n-button type="info" :disabled="!selectedPlatform" :loading="addingAccount" @click="handleQuickAdd">
-            快速添加（已登录）
+    <!-- 未绑定账号模块 -->
+    <section class="section">
+      <div class="section-header">
+        <span class="section-title">未绑定账号</span>
+        <span class="section-count">{{ unboundPlatforms.length }}</span>
+      </div>
+      
+      <div v-if="unboundPlatforms.length === 0" class="empty-state">
+        所有平台均已绑定账号
+      </div>
+      
+      <div v-else class="platform-grid">
+        <div 
+          v-for="platform in unboundPlatforms" 
+          :key="platform.id"
+          class="platform-row"
+        >
+          <div class="platform-left">
+            <span class="platform-icon">{{ platform.icon }}</span>
+            <span class="platform-name">{{ platform.name }}</span>
+          </div>
+          <n-button 
+            size="small"
+            :loading="loginLoadingMap[platform.id]"
+            @click="loginPlatform(platform.id)"
+          >
+            登录
           </n-button>
-          <n-button type="primary" :disabled="!selectedPlatform" :loading="addingAccount" @click="handleGuidedAdd">
-            引导登录
-          </n-button>
-        </n-space>
-      </template>
-    </n-modal>
+        </div>
+      </div>
+    </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, watch } from 'vue';
-import { db, type Account, AccountStatus } from '@synccaster/core';
+import { ref, reactive, computed, onMounted } from 'vue';
+import { db, type Account } from '@synccaster/core';
 import { useMessage } from 'naive-ui';
 
 defineProps<{ isDark?: boolean }>();
 const message = useMessage();
 const accounts = ref<Account[]>([]);
-const showAddDialog = ref(false);
-const selectedPlatform = ref<string>('');
-const addingAccount = ref(false);
-const refreshingAll = ref(false);
-// 7.4: Track re-login loading state per account
 const reloginLoadingMap = reactive<Record<string, boolean>>({});
+const loginLoadingMap = reactive<Record<string, boolean>>({});
+const refreshingAll = ref(false);
 
-// 监听对话框打开，重置状态
-watch(showAddDialog, (newVal) => {
-  if (newVal) {
-    // 对话框打开时重置状态
-    addingAccount.value = false;
-    // 不重置 selectedPlatform，让用户可以重试同一个平台
-  } else {
-    // 对话框关闭时重置
-    selectedPlatform.value = '';
-    addingAccount.value = false;
-  }
-});
-
-// 支持的平台列表（全部12个平台）
 const platforms = [
   { id: 'juejin', name: '掘金', icon: '🔷' },
   { id: 'csdn', name: 'CSDN', icon: '📘' },
@@ -205,50 +137,41 @@ const platforms = [
   { id: 'oschina', name: '开源中国', icon: '🔴' },
 ];
 
-// 平台用户主页 URL 模板
-// 注意：各平台的 URL 格式不同，需要根据实际情况配置
-// 当 userId 无效时，返回设置页面或平台首页
+const unboundPlatforms = computed(() => {
+  const boundPlatformIds = new Set(accounts.value.map(a => a.platform));
+  return platforms.filter(p => !boundPlatformIds.has(p.id));
+});
+
 const platformUserUrls: Record<string, (userId?: string) => string> = {
   'juejin': (userId) => userId ? `https://juejin.cn/user/${userId}` : 'https://juejin.cn/user/settings/profile',
   'csdn': (userId) => userId ? `https://blog.csdn.net/${userId}` : 'https://i.csdn.net/#/user-center/profile',
   'zhihu': (userId) => userId ? `https://www.zhihu.com/people/${userId}` : 'https://www.zhihu.com/settings/profile',
   'wechat': () => 'https://mp.weixin.qq.com/',
-  // 简书使用 slug 格式的 userId，如 bb8f42a96b80（不是数字 ID）
   'jianshu': (userId) => {
-    // 检查 userId 是否是有效的 slug（字母数字组合，不是纯数字开头的临时 ID）
     if (userId && !userId.startsWith('jianshu_') && userId.length > 5) {
       return `https://www.jianshu.com/u/${userId}`;
     }
     return 'https://www.jianshu.com/settings/basic';
   },
-  // 博客园使用 blogApp 作为主页路径，格式为 https://home.cnblogs.com/u/{blogApp}
   'cnblogs': (userId) => {
-    // blogApp 通常是字母数字组合，不是纯数字或时间戳格式
-    // 过滤掉临时生成的 ID（如 cnblogs_1765715946013）
     if (userId && userId.length > 2 && !userId.startsWith('cnblogs_') && !/^\d{10,}$/.test(userId)) {
       return `https://home.cnblogs.com/u/${userId}`;
     }
     return 'https://account.cnblogs.com/settings/account';
   },
-  // 51CTO 使用纯数字 uid，个人主页格式为 https://home.51cto.com/space?uid={uid}
   '51cto': (userId) => {
-    // 51CTO 的 uid 应该是纯数字
     if (userId && /^\d+$/.test(userId)) {
       return `https://home.51cto.com/space?uid=${userId}`;
     }
     return 'https://home.51cto.com/space';
   },
-  // 腾讯云开发者社区主页格式为 https://cloud.tencent.com/developer/user/{userId}
   'tencent-cloud': (userId) => {
-    // userId 应该是纯数字
     if (userId && /^\d+$/.test(userId)) {
       return `https://cloud.tencent.com/developer/user/${userId}`;
     }
     return 'https://cloud.tencent.com/developer/user';
   },
-  // 阿里云开发者社区主页格式为 https://developer.aliyun.com/profile/{userId}
   'aliyun': (userId) => {
-    // userId 应该是纯数字
     if (userId && /^\d+$/.test(userId)) {
       return `https://developer.aliyun.com/profile/${userId}`;
     }
@@ -261,7 +184,35 @@ const platformUserUrls: Record<string, (userId?: string) => string> = {
 
 onMounted(async () => {
   await loadAccounts();
+  await quickStatusCheckOnStartup();
 });
+
+async function quickStatusCheckOnStartup() {
+  if (accounts.value.length === 0) return;
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: 'QUICK_STATUS_CHECK_ALL',
+      data: { accounts: accounts.value },
+    });
+    if (result.success && result.results) {
+      const updatedAccounts = accounts.value.map(account => {
+        const checkResult = result.results[account.id];
+        if (checkResult) {
+          if (!checkResult.hasValidCookies && account.status === 'active') {
+            return { ...account, cookieExpiresAt: undefined, needsLazyCheck: true };
+          }
+          if (checkResult.cookieExpiresAt) {
+            return { ...account, cookieExpiresAt: checkResult.cookieExpiresAt };
+          }
+        }
+        return account;
+      });
+      accounts.value = updatedAccounts;
+    }
+  } catch (error) {
+    console.error('Quick status check failed:', error);
+  }
+}
 
 async function loadAccounts() {
   try {
@@ -273,274 +224,125 @@ async function loadAccounts() {
 }
 
 function getPlatformName(platform: string) {
-  const names: Record<string, string> = {
-    wechat: '微信公众号',
-    zhihu: '知乎',
-    juejin: '掘金',
-    csdn: 'CSDN',
-    jianshu: '简书',
-    cnblogs: '博客园',
-    '51cto': '51CTO',
-    'tencent-cloud': '腾讯云开发者社区',
-    aliyun: '阿里云开发者社区',
-    segmentfault: '思否',
-    bilibili: 'B站专栏',
-    oschina: '开源中国',
-  };
-  return names[platform] || platform;
+  const found = platforms.find(p => p.id === platform);
+  return found?.name || platform;
 }
 
-function formatCount(count: number): string {
-  if (count >= 10000) {
-    return (count / 10000).toFixed(1) + 'w';
-  }
-  if (count >= 1000) {
-    return (count / 1000).toFixed(1) + 'k';
-  }
-  return count.toString();
+function isAccountExpiringSoon(account: Account): boolean {
+  if (!account.cookieExpiresAt) return false;
+  const EXPIRING_SOON_THRESHOLD = 24 * 60 * 60 * 1000;
+  return (account.cookieExpiresAt - Date.now()) < EXPIRING_SOON_THRESHOLD && (account.cookieExpiresAt - Date.now()) > 0;
 }
 
-/**
- * 跳转到平台用户主页
- * 
- * 从账号 ID 中提取真实的 userId（格式为 platform_userId 或 platform-userId）
- * 如果账号有 profileUrl 字段，优先使用
- */
+function formatExpiresIn(expiresAt?: number): string {
+  if (!expiresAt) return '未知';
+  const diff = expiresAt - Date.now();
+  if (diff <= 0) return '已过期';
+  const hours = Math.floor(diff / (60 * 60 * 1000));
+  const minutes = Math.floor((diff % (60 * 60 * 1000)) / (60 * 1000));
+  return hours > 0 ? `${hours}小时${minutes}分钟` : `${minutes}分钟`;
+}
+
 function goToUserProfile(account: Account) {
-  // 优先使用账号存储的 profileUrl（如果有）
   if ((account as any).profileUrl) {
     window.open((account as any).profileUrl, '_blank');
     return;
   }
-  
   const urlFn = platformUserUrls[account.platform];
-  if (urlFn) {
-    // 从 account.id 中提取 userId
-    // 账号 ID 格式可能是：
-    // - platform_userId（下划线分隔，如 jianshu_bb8f42a96b80）
-    // - platform-userId（连字符分隔，如 cnblogs-RyanYipeng）
-    let userId: string | undefined;
-    
-    // 先尝试下划线分隔（新格式）
-    const underscoreIndex = account.id.indexOf('_');
-    if (underscoreIndex > 0) {
-      const prefix = account.id.substring(0, underscoreIndex);
-      // 确保前缀是平台名
-      if (prefix === account.platform || prefix.replace('-', '') === account.platform.replace('-', '')) {
-        userId = account.id.substring(underscoreIndex + 1);
+  if (!urlFn) return;
+  let userId: string | undefined;
+  const underscoreIndex = account.id.indexOf('_');
+  if (underscoreIndex > 0) {
+    const prefix = account.id.substring(0, underscoreIndex);
+    if (prefix === account.platform || prefix.replace('-', '') === account.platform.replace('-', '')) {
+      userId = account.id.substring(underscoreIndex + 1);
+    }
+  }
+  if (!userId) {
+    const idParts = account.id.split('-');
+    if (idParts.length > 1) {
+      userId = account.platform === 'tencent-cloud' && idParts.length > 2
+        ? idParts.slice(2).join('-')
+        : idParts.slice(1).join('-');
+    }
+  }
+  if (userId === 'undefined' || userId === '' || /^\d{10,}$/.test(userId || '')) {
+    userId = undefined;
+  }
+  if (!userId) {
+    const profileId = (account.meta as any)?.profileId;
+    if (typeof profileId === 'string' && profileId.trim()) {
+      const trimmed = profileId.trim();
+      if (!(account.platform === 'jianshu' && /^\d+$/.test(trimmed))) {
+        userId = trimmed;
       }
     }
-    
-    // 如果下划线分隔没找到，尝试连字符分隔（旧格式）
-    if (!userId) {
-      const idParts = account.id.split('-');
-      // 第一部分是平台名，剩余部分是 userId（userId 本身可能包含 -）
-      if (idParts.length > 1) {
-        // 特殊处理：tencent-cloud 平台名本身包含连字符
-        if (account.platform === 'tencent-cloud' && idParts.length > 2) {
-          userId = idParts.slice(2).join('-');
-        } else {
-          userId = idParts.slice(1).join('-');
-        }
-      }
-    }
-    
-    // 过滤掉无效的 userId（如 undefined, 空字符串, 或临时生成的 ID）
-    // 临时 ID 格式为 platform_timestamp（如 jianshu_1765638738736, cnblogs_1765715946013）
-    if (userId === 'undefined' || userId === '' || 
-        userId?.startsWith('jianshu_') || 
-        userId?.startsWith('cnblogs_') ||
-        userId?.startsWith('csdn_') ||
-        /^\d{10,}$/.test(userId || '')) {
-      userId = undefined;
-    }
-
-    // 兜底：使用刷新时写入的 profileId（避免因账号 id 不是平台 userId 导致跳转错误）
-    if (!userId) {
-      const profileId = (account.meta as any)?.profileId;
-      if (typeof profileId === 'string' && profileId.trim()) {
-        const trimmed = profileId.trim();
-        // 简书 profileId 必须是 slug（非纯数字），避免历史脏数据导致跳转到错误页面
-        if (!(account.platform === 'jianshu' && /^\d+$/.test(trimmed))) {
-          userId = trimmed;
-        }
-      }
-    }
-
-    // 博客园兜底：部分场景无法获取 blogApp 时，尝试用昵称（若符合 blogApp 规范）
-    if (!userId && account.platform === 'cnblogs') {
-      const nickname = account.nickname?.trim();
-      if (nickname && /^[a-zA-Z0-9][a-zA-Z0-9_-]{2,}$/.test(nickname)) {
-        userId = nickname;
-      }
-    }
-    
-    const url = urlFn(userId);
-    window.open(url, '_blank');
   }
+  if (!userId && account.platform === 'cnblogs') {
+    const nickname = account.nickname?.trim();
+    if (nickname && /^[a-zA-Z0-9][a-zA-Z0-9_-]{2,}$/.test(nickname)) {
+      userId = nickname;
+    }
+  }
+  window.open(urlFn(userId), '_blank');
 }
 
-async function handleQuickAdd() {
-  if (!selectedPlatform.value) {
-    message.warning('请先选择平台');
-    return;
-  }
-  
-  addingAccount.value = true;
-  const platform = selectedPlatform.value;
-  
-  try {
-    const result = await chrome.runtime.sendMessage({
-      type: 'QUICK_ADD_ACCOUNT',
-      data: { platform },
-    });
-
-    if (result && result.success) {
-      message.success('账号添加成功！');
-      showAddDialog.value = false;
-      selectedPlatform.value = '';
-      await loadAccounts();
-    } else {
-      const errorMsg = result?.error || '添加失败，请先在该平台登录';
-      message.error(errorMsg);
-    }
-  } catch (error: any) {
-    console.error('Failed to quick add account:', error);
-    message.error('添加失败: ' + (error.message || '未知错误'));
-  } finally {
-    addingAccount.value = false;
-  }
-}
-
-async function handleGuidedAdd() {
-  if (!selectedPlatform.value) {
-    message.warning('请先选择平台');
-    return;
-  }
-  
-  addingAccount.value = true;
-  const platform = selectedPlatform.value;
-  
-  // 不立即关闭对话框，让用户看到提示
-  const loadingMsg = message.loading('正在打开登录页面，请完成登录...', { duration: 0 });
-  
-  try {
-    const result = await chrome.runtime.sendMessage({
-      type: 'ADD_ACCOUNT',
-      data: { platform },
-    });
-
-    loadingMsg.destroy();
-
-    if (result && result.success) {
-      message.success('账号添加成功！');
-      showAddDialog.value = false;
-      selectedPlatform.value = '';
-      await loadAccounts();
-    } else {
-      const errorMsg = result?.error || '添加失败';
-      message.error(errorMsg);
-      // 失败时重新打开对话框
-      showAddDialog.value = true;
-    }
-  } catch (error: any) {
-    loadingMsg.destroy();
-    console.error('Failed to add account:', error);
-    message.error('添加失败: ' + (error.message || '未知错误'));
-    // 失败时重新打开对话框
-    showAddDialog.value = true;
-  } finally {
-    addingAccount.value = false;
-  }
-}
-
-async function refreshAccount(account: Account) {
-  const loadingMsg = message.loading('正在刷新账号信息...', { duration: 0 });
-  
-  try {
-    const result = await chrome.runtime.sendMessage({
-      type: 'REFRESH_ACCOUNT',
-      data: { account },
-    });
-
-    loadingMsg.destroy();
-
-    if (result.success) {
-      message.success('账号信息已更新');
-      await loadAccounts();
-    } else {
-      message.error(result.error || '刷新失败');
-      // 7.6: Reload accounts to show updated status
-      await loadAccounts();
-    }
-  } catch (error: any) {
-    loadingMsg.destroy();
-    console.error('Failed to refresh account:', error);
-    message.error('刷新失败: ' + error.message);
-  }
-}
-
-/**
- * 7.4: Re-login account
- * 
- * Send RELOGIN_ACCOUNT message to background, show loading message during login,
- * and handle success/failure responses.
- * 
- * Requirements: 4.2, 4.4, 4.5
- */
 async function reloginAccount(account: Account) {
   const platformName = getPlatformName(account.platform);
-  
-  // Set loading state for this account
   reloginLoadingMap[account.id] = true;
-  const loadingMsg = message.loading(`正在打开 ${platformName} 登录页面，请完成登录...`, { duration: 0 });
-  
+  const loadingMsg = message.loading(`正在打开 ${platformName} 登录页面...`, { duration: 0 });
   try {
     const result = await chrome.runtime.sendMessage({
       type: 'RELOGIN_ACCOUNT',
       data: { account },
     });
-
     loadingMsg.destroy();
-
     if (result.success) {
-      // 4.4: Show success message when login is detected successfully
       message.success(`${platformName} 重新登录成功！`);
       await loadAccounts();
     } else {
-      // 4.5: Show message indicating login was not completed
       message.warning(result.error || '登录未完成，请重试');
     }
   } catch (error: any) {
     loadingMsg.destroy();
-    console.error('Failed to re-login account:', error);
-    // 4.5: Show message indicating login was not completed
     message.error('重新登录失败: ' + (error.message || '未知错误'));
   } finally {
-    // Clear loading state
     reloginLoadingMap[account.id] = false;
   }
 }
 
-/**
- * 7.6: Refresh all accounts with enhanced status handling
- * 
- * Update local accounts array with returned status and improve error message
- * display based on errorType.
- * 
- * Requirements: 2.2, 2.3
- */
-async function refreshAllAccounts() {
-  if (accounts.value.length === 0) {
-    message.warning('暂无账号需要刷新');
-    return;
+async function loginPlatform(platformId: string) {
+  const platform = platforms.find(p => p.id === platformId);
+  if (!platform) return;
+  loginLoadingMap[platformId] = true;
+  const loadingMsg = message.loading(`正在打开 ${platform.name} 登录页面...`, { duration: 0 });
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: 'ADD_ACCOUNT',
+      data: { platform: platformId },
+    });
+    loadingMsg.destroy();
+    if (result?.success) {
+      message.success(`${platform.name} 账号绑定成功！`);
+      await loadAccounts();
+    } else {
+      message.warning(result?.error || '登录未完成，请重试');
+    }
+  } catch (error: any) {
+    loadingMsg.destroy();
+    message.error('登录失败: ' + (error.message || '未知错误'));
+  } finally {
+    loginLoadingMap[platformId] = false;
   }
+}
+
+async function refreshAllAccounts() {
+  if (accounts.value.length === 0) return;
   
   refreshingAll.value = true;
-  const loadingMsg = message.loading(`正在快速刷新 ${accounts.value.length} 个账号...`, { duration: 0 });
+  const loadingMsg = message.loading(`正在刷新 ${accounts.value.length} 个账号...`, { duration: 0 });
   
   try {
-    // 使用新的快速批量刷新 API（并行，无需打开标签页）
     const result = await chrome.runtime.sendMessage({
       type: 'REFRESH_ALL_ACCOUNTS_FAST',
       data: { accounts: accounts.value },
@@ -552,70 +354,209 @@ async function refreshAllAccounts() {
       const { successCount, failedCount, failedAccounts } = result;
       
       if (failedCount === 0) {
-        message.success(`全部 ${successCount} 个账号刷新成功`);
+        message.success(`全部 ${successCount} 个账号状态正常`);
       } else if (successCount === 0) {
-        message.error(`全部 ${failedCount} 个账号刷新失败`);
+        message.error(`全部 ${failedCount} 个账号登录已失效`);
       } else {
-        message.warning(`刷新完成：${successCount} 成功，${failedCount} 失败`);
+        message.warning(`${successCount} 个正常，${failedCount} 个已失效`);
       }
       
-      // 7.6: Distinguish between truly expired and temporary errors based on status
       if (failedAccounts && failedAccounts.length > 0) {
-        // 真正失效的账号（status 为 expired）
-        const reallyExpired = failedAccounts.filter((f: any) => 
-          f.account.status === AccountStatus.EXPIRED || 
-          f.errorType === 'logged_out' || 
-          f.retryable === false
-        );
-        // 临时错误（status 为 error，可重试）
-        const maybeTemporary = failedAccounts.filter((f: any) => 
-          f.account.status === AccountStatus.ERROR ||
-          (f.retryable === true && f.errorType !== 'logged_out')
-        );
-        
-        // 2.2: Show different visual indicators for expired vs temporarily failed
-        if (reallyExpired.length > 0) {
-          const expiredNames = reallyExpired.map((f: any) => 
-            getPlatformName(f.account.platform)
-          ).join('、');
-          message.error(`以下账号登录已失效，请点击"重新登录"：${expiredNames}`, { duration: 6000 });
-        }
-        
-        // 2.3: Show message suggesting retry later for temporary errors
-        if (maybeTemporary.length > 0) {
-          const tempNames = maybeTemporary.map((f: any) => 
-            `${getPlatformName(f.account.platform)}(${f.error || '检测异常'})`
-          ).join('、');
-          message.warning(`以下账号检测异常（可能是临时问题，稍后重试即可）：${tempNames}`, { duration: 5000 });
+        const expiredNames = failedAccounts
+          .filter((f: any) => f.account.status === 'expired' || f.errorType === 'logged_out')
+          .map((f: any) => getPlatformName(f.account.platform))
+          .join('、');
+        if (expiredNames) {
+          message.error(`以下账号需重新登录：${expiredNames}`, { duration: 5000 });
         }
       }
       
-      // 7.6: Reload accounts to display updated status fields
       await loadAccounts();
     } else {
       message.error(result.error || '刷新失败');
     }
   } catch (error: any) {
     loadingMsg.destroy();
-    console.error('Failed to refresh all accounts:', error);
     message.error('刷新失败: ' + error.message);
   } finally {
     refreshingAll.value = false;
   }
 }
+</script>
 
-async function deleteAccount(account: Account) {
-  if (!confirm(`确定要删除账号"${account.nickname}"吗？`)) {
-    return;
-  }
+<style scoped>
+.accounts-page {
+  width: 100%;
+}
 
-  try {
-    await db.accounts.delete(account.id);
-    message.success('账号已删除');
-    await loadAccounts();
-  } catch (error) {
-    console.error('Failed to delete account:', error);
-    message.error('删除失败');
+.page-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+
+.section {
+  margin-bottom: 32px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--n-border-color);
+}
+
+.section-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--n-text-color-2);
+}
+
+.section-count {
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  background: var(--n-color-embedded);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+
+.empty-state {
+  padding: 24px;
+  text-align: center;
+  color: var(--n-text-color-3);
+  font-size: 14px;
+}
+
+/* 已绑定账号 - 两列网格 */
+.account-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .account-grid {
+    grid-template-columns: 1fr;
   }
 }
-</script>
+
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--n-color-embedded);
+  transition: background-color 0.15s;
+}
+
+.account-row:hover {
+  background: var(--n-color-embedded-popover);
+}
+
+.account-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.account-name {
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+.account-name:hover {
+  color: var(--n-primary-color);
+}
+
+.account-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* 状态指示点 */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.status-success {
+  background-color: #22c55e;
+}
+
+.status-warning {
+  background-color: #f59e0b;
+}
+
+.status-error {
+  background-color: #ef4444;
+}
+
+/* 未绑定平台 - 三列网格 */
+.platform-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+@media (max-width: 900px) {
+  .platform-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .platform-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.platform-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--n-color-embedded);
+  transition: background-color 0.15s;
+}
+
+.platform-row:hover {
+  background: var(--n-color-embedded-popover);
+}
+
+.platform-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.platform-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.platform-name {
+  font-size: 14px;
+  font-weight: 500;
+}
+</style>

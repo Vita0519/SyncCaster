@@ -335,6 +335,128 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
         return { success: false, error: error.message };
       }
 
+    case 'LAZY_CHECK_ACCOUNT':
+      // 懒加载检测账号状态（用户选择平台时才检测）
+      logger.info('account', 'Lazy check account', { platform: message.data?.account?.platform });
+      try {
+        const result = await AccountService.lazyCheckAccount(
+          message.data.account, 
+          message.data.forceCheck
+        );
+        return { success: true, ...result };
+      } catch (error: any) {
+        logger.error('account', 'Failed to lazy check account', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'LAZY_CHECK_ACCOUNTS':
+      // 批量懒加载检测
+      logger.info('account', 'Lazy check accounts', { count: message.data?.accounts?.length });
+      try {
+        const result = await AccountService.lazyCheckAccounts(message.data.accounts);
+        return { success: true, ...result };
+      } catch (error: any) {
+        logger.error('account', 'Failed to lazy check accounts', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'AUTO_OPEN_LOGIN_PAGE':
+      // 自动打开登录页面
+      logger.info('account', 'Auto open login page', { platform: message.data?.account?.platform });
+      try {
+        const result = await AccountService.autoOpenLoginPage(
+          message.data.account,
+          message.data.options
+        );
+        return { success: result.success, tabId: result.tabId };
+      } catch (error: any) {
+        logger.error('account', 'Failed to auto open login page', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'GET_MANUAL_PUBLISH_URL':
+      // 获取手动发布 URL
+      try {
+        const url = AccountService.getManualPublishUrl(message.data.platform);
+        return { success: true, url };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+
+    case 'OPEN_MANUAL_PUBLISH_PAGE':
+      // 打开手动发布页面
+      logger.info('account', 'Open manual publish page', { platform: message.data?.platform });
+      try {
+        const opened = await AccountService.openManualPublishPage(message.data.platform);
+        return { success: opened };
+      } catch (error: any) {
+        logger.error('account', 'Failed to open manual publish page', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'QUICK_STATUS_CHECK':
+      // 快速状态检测（仅检测 Cookie 存在性，不调用 API）
+      logger.info('account', 'Quick status check', { platform: message.data?.account?.platform });
+      try {
+        const result = await AccountService.quickStatusCheck(message.data.account);
+        return { success: true, ...result };
+      } catch (error: any) {
+        logger.error('account', 'Failed to quick status check', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'QUICK_STATUS_CHECK_ALL':
+      // 批量快速状态检测
+      logger.info('account', 'Quick status check all', { count: message.data?.accounts?.length });
+      try {
+        const results = await AccountService.quickStatusCheckAll(message.data.accounts);
+        // 将 Map 转换为普通对象以便序列化
+        const resultsObj: Record<string, any> = {};
+        results.forEach((value, key) => {
+          resultsObj[key] = value;
+        });
+        return { success: true, results: resultsObj };
+      } catch (error: any) {
+        logger.error('account', 'Failed to quick status check all', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'SHOULD_REFRESH_ACCOUNT':
+      // 判断账号是否需要刷新
+      try {
+        const result = await AccountService.shouldRefreshAccount(
+          message.data.account,
+          message.data.options
+        );
+        return { success: true, ...result };
+      } catch (error: any) {
+        logger.error('account', 'Failed to check should refresh', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'SMART_REFRESH_ACCOUNT':
+      // 智能刷新账号（根据条件决定是否刷新）
+      logger.info('account', 'Smart refresh account', { platform: message.data?.account?.platform });
+      try {
+        const result = await AccountService.smartRefreshAccount(
+          message.data.account,
+          message.data.options
+        );
+        return { success: true, ...result };
+      } catch (error: any) {
+        logger.error('account', 'Failed to smart refresh account', { error });
+        return { success: false, error: error.message };
+      }
+
+    case 'CHECK_ACCOUNT_EXPIRATION':
+      // 检查账号是否过期或即将过期
+      try {
+        const result = AccountService.isAccountExpiredOrExpiring(message.data.account);
+        return { success: true, ...result };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+
     case 'CONTENT_COLLECTED':
       // 内容采集完成的通知
       logger.info('collect', 'Content collected successfully', message.data);

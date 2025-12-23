@@ -1145,7 +1145,14 @@ const aliyunDetector: PlatformAuthDetector = {
 };
 
 // ============================================================
-// 思否检测器 - API 优先
+// 思否检测器 - 多重检测策略
+// ============================================================
+// 思否检测器 - 多重检测策略（优化版）
+// 
+// 思否网站特点：
+// 1. 登录后页面右上角显示用户头像
+// 2. 用户主页格式：https://segmentfault.com/u/{slug}
+// 3. 页面可能包含 __INITIAL_STATE__ 全局变量
 // ============================================================
 const segmentfaultDetector: PlatformAuthDetector = {
   id: 'segmentfault',
@@ -1153,56 +1160,276 @@ const segmentfaultDetector: PlatformAuthDetector = {
   async checkLogin(): Promise<LoginState> {
     log('segmentfault', '检测登录状态...');
     
-    // 尝试 API
-    try {
-      const res = await fetch('https://segmentfault.com/api/user/current', {
-        credentials: 'include',
-        headers: { 'Accept': 'application/json' },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.status === 0 && data.data) {
-          const user = data.data;
-          log('segmentfault', '从 API 获取到用户信息', { nickname: user.name });
-          return {
-            loggedIn: true,
-            platform: 'segmentfault',
-            userId: String(user.id),
-            nickname: user.name || user.nickname || '思否用户',
-            avatar: user.avatar || user.avatarUrl,
-            meta: {
-              followersCount: user.followers,
-              articlesCount: user.articles,
-            },
-          };
+    // 辅助函数：从 DOM 中提取用户信息
+    const extractUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
+      let nickname: string | undefined;
+      let avatar: string | undefined;
+      let userId: string | undefined;
+      
+      // 1. 尝试从导航栏用户头像区域提取
+      const navUserSelectors = [
+        '.nav-user',
+        '.user-nav',
+        '.header-user',
+        '.navbar-user',
+        '[class*="nav"][class*="user"]',
+        '[class*="header"][class*="user"]',
+      ];
+      
+      for (const selector of navUserSelectors) {
+        const navUser = document.querySelector(selector);
+        if (navUser) {
+          // 提取头像
+          const avatarImg = navUser.querySelector('img') as HTMLImageElement;
+          if (avatarImg?.src && !avatarImg.src.includes('default') && !avatarImg.src.includes('placeholder')) {
+            avatar = avatarImg.src;
+          }
+          
+          // 提取用户名
+          const nameEl = navUser.querySelector('[class*="name"], [class*="nick"], a[href^="/u/"]');
+          if (nameEl) {
+            const text = nameEl.textContent?.trim();
+            if (text && text.length > 0 && text.length < 50) {
+              nickname = text;
+            }
+          }
+          
+          // 提取用户 slug
+          const userLink = navUser.querySelector('a[href^="/u/"]') as HTMLAnchorElement;
+          if (userLink) {
+            const match = userLink.href.match(/\/u\/([^\/\?]+)/);
+            if (match?.[1]) {
+              userId = match[1];
+            }
+          }
+          
+          if (avatar || nickname) break;
         }
       }
-    } catch (e) {
-      log('segmentfault', 'API 调用失败', e);
-    }
+      
+      // 2. 尝试从页面中的用户链接提取
+      if (!userId) {
+        const userLinks = document.querySelectorAll('a[href^="/u/"]');
+        for (const link of userLinks) {
+          const href = (link as HTMLAnchorElement).href;
+          const match = href.match(/\/u\/([^\/\?]+)/);
+          if (match?.[1]) {
+            userId = match[1];
+            if (!nickname) {
+              const text = link.textContent?.trim();
+              if (text && text.length > 0 && text.length < 50) {
+                nickname = text;
+              }
+            }
+            break;
+          }
+        }
+      }
+      
+      // 3. 尝试从头像图片提取
+      if (!avatar) {
+        const avatarImgs = document.querySelectorAll('img[class*="avatar"], img[src*="avatar"]');
+        for (const img of avatarImgs) {
+          const src = (img as HTMLImageElement).src;
+          if (src && !src.includes('default') && !src.includes('placeholder') && src.includes('http')) {
+            avatar = src;
+            break;
+          }
+        }
+      }
+      
+      return { nickname, avatar, userId };
+    };
     
-    // 检查全局变量
-    const win = window as any;
-    if (win.SF?.user?.id) {
+    // 辅助函数：从全局变量提取用户信息
+    const extractUserFromGlobal = (): { nickname?: string; avatar?: string; userId?: string } | null => {
+      const win = window as any;
+      
+      // 尝试多种可能的全局变量
+      const possibleSources = [
+        win.__INITIAL_STATE__,
+        win.__NUXT__,
+        win.SF,
+        win.__SF__,
+        win.pageData,
+        win.__pageData__,
+      ];
+      
+      for (const source of possibleSources) {
+        if (!source) continue;
+        
+        // 尝试从不同路径获取用户信息
+        const userPaths = [
+          source.user,
+          source.currentUser,
+          source.auth?.user,
+          source.global?.user,
+          source.data?.user,
+          source.state?.user,
+        ];
+        
+        for (const user of userPaths) {
+          if (user && (user.id || user.uid || user.slug || user.name)) {
+            // 思否中 name 是 URL slug，nickname 才是真实显示名称
+            const displayName = user.nickname || user.nick || user.name || '';
+            log('segmentfault', '从全局变量获取到用户信息', { nickname: displayName, slug: user.name });
+            return {
+              userId: String(user.id || user.uid || user.slug || ''),
+              nickname: displayName,
+              avatar: user.avatar || user.avatarUrl || user.avatar_url,
+            };
+          }
+        }
+      }
+      
+      return null;
+    };
+    
+    // 1. 首先尝试从全局变量获取用户信息
+    const globalUser = extractUserFromGlobal();
+    if (globalUser && (globalUser.nickname || globalUser.userId)) {
       return {
         loggedIn: true,
         platform: 'segmentfault',
-        userId: win.SF.user.id,
-        nickname: win.SF.user.name || '思否用户',
-        avatar: win.SF.user.avatar,
+        userId: globalUser.userId,
+        nickname: globalUser.nickname || '思否用户',
+        avatar: globalUser.avatar,
       };
     }
     
-    // 检查退出按钮
-    const logoutEl = document.querySelector('a[href*="logout"], a[href*="/user/logout"]');
-    if (logoutEl) {
+    // 2. 尝试 API（多个可能的接口）
+    const apiEndpoints = [
+      'https://segmentfault.com/api/users/-/info',
+      'https://segmentfault.com/api/user/info',
+      'https://segmentfault.com/api/user/-/info',
+    ];
+    
+    for (const endpoint of apiEndpoints) {
+      try {
+        const res = await fetch(endpoint, {
+          credentials: 'include',
+          headers: { 'Accept': 'application/json' },
+        });
+        if (res.ok) {
+          const text = await res.text();
+          // 检查是否是 HTML
+          if (text.startsWith('<!') || text.startsWith('<html')) {
+            continue;
+          }
+          
+          try {
+            const data = JSON.parse(text);
+            // 兼容多种响应格式
+            const user = data.data || data.user || data;
+            const isSuccess = data.status === 0 || data.code === 0 || data.success === true || 
+                             (user && (user.id || user.uid || user.slug || user.name));
+            
+            if (isSuccess && user && (user.id || user.uid || user.slug || user.name)) {
+              // 思否中 name 是 URL slug，nickname 才是真实显示名称
+              const displayName = user.nickname || user.nick || user.name || user.username || '';
+              log('segmentfault', '从 API 获取到用户信息', { endpoint, nickname: displayName, slug: user.name });
+              return {
+                loggedIn: true,
+                platform: 'segmentfault',
+                userId: String(user.id || user.uid || user.slug || ''),
+                nickname: displayName || '思否用户',
+                avatar: user.avatar || user.avatarUrl || user.avatar_url,
+                meta: {
+                  followersCount: user.followers || user.follower_count,
+                  articlesCount: user.articles || user.article_count,
+                },
+              };
+            }
+          } catch {}
+        }
+      } catch (e) {
+        log('segmentfault', `API ${endpoint} 调用失败`, e);
+      }
+    }
+    
+    // 3. 从 DOM 中提取用户信息
+    const domUser = extractUserFromDom();
+    if (domUser.avatar || domUser.nickname || domUser.userId) {
+      log('segmentfault', '从 DOM 获取到用户信息', domUser);
       return {
         loggedIn: true,
         platform: 'segmentfault',
-        nickname: '思否用户',
+        userId: domUser.userId,
+        nickname: domUser.nickname || '思否用户',
+        avatar: domUser.avatar,
       };
     }
     
+    // 4. 检查页面中是否有退出/设置按钮（登录后才有）
+    const logoutSelectors = [
+      'a[href*="logout"]',
+      'a[href*="/user/logout"]',
+      'a[href*="/user/settings"]',
+      '[data-action="logout"]',
+      '.logout-btn',
+      '.dropdown-menu a[href*="logout"]',
+      // 思否特有的用户菜单
+      '.user-dropdown',
+      '.nav-user-dropdown',
+      '[class*="user"][class*="dropdown"]',
+    ];
+    
+    for (const selector of logoutSelectors) {
+      const el = document.querySelector(selector);
+      if (el) {
+        log('segmentfault', '检测到退出/设置按钮或用户菜单', { selector });
+        
+        // 尝试再次从 DOM 提取用户信息
+        const retryDomUser = await waitForValue(() => {
+          const user = extractUserFromDom();
+          return (user.nickname || user.avatar) ? user : null;
+        }, { timeoutMs: 2000 });
+        
+        return {
+          loggedIn: true,
+          platform: 'segmentfault',
+          userId: retryDomUser?.userId,
+          nickname: retryDomUser?.nickname || '思否用户',
+          avatar: retryDomUser?.avatar,
+        };
+      }
+    }
+    
+    // 5. 检查登录按钮是否存在（如果存在登录按钮，说明未登录）
+    const loginBtnSelectors = [
+      'a[href*="/user/login"]',
+      'a[href*="login"]',
+      '.login-btn',
+      '[class*="login"][class*="btn"]',
+    ];
+    
+    let hasLoginBtn = false;
+    for (const selector of loginBtnSelectors) {
+      try {
+        const el = document.querySelector(selector);
+        if (el && (el.textContent?.includes('登录') || el.textContent?.includes('Login'))) {
+          hasLoginBtn = true;
+          break;
+        }
+      } catch {}
+    }
+    
+    if (hasLoginBtn) {
+      log('segmentfault', '检测到登录按钮，判定为未登录');
+      return { loggedIn: false, platform: 'segmentfault' };
+    }
+    
+    // 6. 最后尝试让 background 检测
+    const bg = await fetchPlatformInfoFromBackground('segmentfault');
+    if (bg?.loggedIn) {
+      log('segmentfault', '从 background 获取到登录状态', bg);
+      return {
+        ...bg,
+        nickname: bg.nickname || '思否用户',
+      };
+    }
+    
+    log('segmentfault', '未检测到登录状态');
     return { loggedIn: false, platform: 'segmentfault' };
   },
 };

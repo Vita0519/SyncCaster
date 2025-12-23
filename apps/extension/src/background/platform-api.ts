@@ -130,7 +130,23 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
   },
   'segmentfault': {
     url: 'https://segmentfault.com/',
-    sessionCookies: ['PHPSESSID', 'sf_remember', 'SERVERID'],
+    // 思否可能使用的登录态 Cookie（扩展列表）
+    sessionCookies: [
+      'PHPSESSID',           // PHP 会话
+      'sf_remember',         // 记住登录
+      'SERVERID',            // 服务器 ID
+      'Hm_lvt_',             // 百度统计（登录用户）
+      'Hm_lpvt_',            // 百度统计
+      'sensorsdata2015jssdkcross', // 神策数据
+      'sajssdk_2015_cross_new_user', // 神策新用户标识
+      'sf_token',            // 思否 token
+      'sf_session',          // 思否会话
+      'user_id',             // 用户 ID
+      'uid',                 // 用户 ID
+      'token',               // 通用 token
+      'auth_token',          // 认证 token
+      'access_token',        // 访问 token
+    ],
   },
   'oschina': {
     url: 'https://www.oschina.net/',
@@ -151,7 +167,8 @@ export interface UserInfo {
   error?: string;
   errorType?: AuthErrorType;  // 错误类型
   retryable?: boolean;        // 是否可重试
-  detectionMethod?: 'api' | 'cookie';  // 检测方式
+  detectionMethod?: 'api' | 'cookie' | 'html';  // 检测方式
+  cookieExpiresAt?: number;   // Cookie 最早过期时间（毫秒时间戳）
   meta?: {
     level?: number;
     followersCount?: number;
@@ -350,6 +367,109 @@ async function parseApiResponse(
 // ============================================================
 
 /**
+ * 获取 Cookie 最早过期时间
+ * 
+ * 遍历所有会话 Cookie，找出最早的过期时间。
+ * 用于提前预警用户登录即将失效。
+ * 
+ * @param cookies - Cookie 列表
+ * @param sessionCookieNames - 会话 Cookie 名称列表
+ * @returns 最早过期时间（毫秒时间戳），如果都是 session cookie 则返回 undefined
+ */
+function getCookieEarliestExpiration(
+  cookies: chrome.cookies.Cookie[],
+  sessionCookieNames: string[]
+): number | undefined {
+  const sessionCookieNameSet = new Set(sessionCookieNames.map(n => n.toLowerCase()));
+  
+  let earliestExpiration: number | undefined;
+  
+  for (const cookie of cookies) {
+    // 只检查会话 Cookie
+    if (!sessionCookieNameSet.has(cookie.name.toLowerCase())) {
+      continue;
+    }
+    
+    // 跳过无效值的 Cookie
+    if (!cookie.value || cookie.value.trim().toLowerCase() === 'deleted') {
+      continue;
+    }
+    
+    // expirationDate 是秒级时间戳，需要转换为毫秒
+    // 如果没有 expirationDate，说明是 session cookie（浏览器关闭时失效）
+    if (cookie.expirationDate) {
+      const expiresAt = cookie.expirationDate * 1000;
+      if (earliestExpiration === undefined || expiresAt < earliestExpiration) {
+        earliestExpiration = expiresAt;
+      }
+    }
+  }
+  
+  return earliestExpiration;
+}
+
+/**
+ * 获取平台 Cookie 过期时间
+ * 
+ * 直接获取指定平台的 Cookie 过期时间，不进行登录状态检测。
+ * 用于懒加载检测时快速判断是否需要重新检测。
+ * 
+ * @param platform - 平台标识
+ * @returns Cookie 过期信息
+ */
+export async function getPlatformCookieExpiration(platform: string): Promise<{
+  hasValidCookies: boolean;
+  cookieExpiresAt?: number;
+  isExpiringSoon?: boolean;  // 是否即将过期（24小时内）
+}> {
+  const config = COOKIE_CONFIGS[platform];
+  
+  if (!config) {
+    return { hasValidCookies: false };
+  }
+  
+  try {
+    const urls = [config.url, ...(config.fallbackUrls || [])];
+    const allCookies: chrome.cookies.Cookie[] = [];
+    
+    for (const url of urls) {
+      try {
+        const cookies = await chrome.cookies.getAll({ url });
+        allCookies.push(...cookies);
+      } catch {}
+    }
+    
+    const sessionCookieNameSet = new Set(config.sessionCookies.map(n => n.toLowerCase()));
+    const isValidCookieValue = (value?: string) => {
+      if (!value) return false;
+      const trimmed = value.trim().toLowerCase();
+      return trimmed && trimmed !== 'deleted' && trimmed !== 'null' && trimmed !== 'undefined';
+    };
+    
+    const hasValidCookies = allCookies.some(
+      cookie => sessionCookieNameSet.has(cookie.name.toLowerCase()) && isValidCookieValue(cookie.value)
+    );
+    
+    if (!hasValidCookies) {
+      return { hasValidCookies: false };
+    }
+    
+    const cookieExpiresAt = getCookieEarliestExpiration(allCookies, config.sessionCookies);
+    const now = Date.now();
+    const EXPIRING_SOON_THRESHOLD = 24 * 60 * 60 * 1000; // 24小时
+    
+    return {
+      hasValidCookies: true,
+      cookieExpiresAt,
+      isExpiringSoon: cookieExpiresAt ? (cookieExpiresAt - now) < EXPIRING_SOON_THRESHOLD : false,
+    };
+  } catch (e) {
+    logger.warn('cookie-expiration', `获取 ${platform} Cookie 过期时间失败`, e as Record<string, unknown>);
+    return { hasValidCookies: false };
+  }
+}
+
+/**
  * 通过 Cookie 检测登录状态
  * 
  * 当主 API 检测失败时，使用 Cookie 作为备用检测方案。
@@ -410,11 +530,17 @@ export async function detectViaCookies(platform: string): Promise<UserInfo> {
     );
     
     if (hasValidSession) {
-      logger.info('cookie-detect', `${platform} Cookie 检测成功，存在有效会话`);
+      // 计算 Cookie 最早过期时间
+      const cookieExpiresAt = getCookieEarliestExpiration(allCookies, config.sessionCookies);
+      
+      logger.info('cookie-detect', `${platform} Cookie 检测成功，存在有效会话`, {
+        cookieExpiresAt: cookieExpiresAt ? new Date(cookieExpiresAt).toISOString() : 'session'
+      });
       return {
         loggedIn: true,
         platform,
         detectionMethod: 'cookie',
+        cookieExpiresAt,
       };
     } else {
       // 记录找到的 Cookie 名称，便于调试
@@ -952,7 +1078,7 @@ const cnblogsApi: PlatformApiConfig = {
         if (res.ok) {
           const text = await res.text();
           const preview = text.substring(0, 500);
-          logger.info('cnblogs', `API ${endpoint} 响应`, preview);
+          logger.info('cnblogs', `API ${endpoint} 响应`, { preview });
 
           // 处理未登录时的跳转/HTML 页面
           if (preview.trim().startsWith('<')) {
@@ -1005,7 +1131,7 @@ const cnblogsApi: PlatformApiConfig = {
               };
             }
           } catch (parseErr) {
-            logger.warn('cnblogs', `API ${endpoint} 响应解析失败`, parseErr);
+            logger.warn('cnblogs', `API ${endpoint} 响应解析失败`, { error: parseErr });
           }
         }
       } catch (e: any) {
@@ -1463,32 +1589,266 @@ const segmentfaultApi: PlatformApiConfig = {
   id: 'segmentfault',
   name: '思否',
   async fetchUserInfo(): Promise<UserInfo> {
-    try {
-      const res = await fetchWithCookies('https://segmentfault.com/api/user/current');
-      
-      return parseApiResponse(res, 'segmentfault', (data) => {
-        if (data.status === 0 && data.data) {
-          const user = data.data;
-          return {
-            loggedIn: true,
-            platform: 'segmentfault',
-            userId: String(user.id),
-            nickname: user.name || user.nickname || '思否用户',
-            avatar: user.avatar || user.avatarUrl,
-            meta: {
-              followersCount: user.followers,
-              articlesCount: user.articles,
-            },
-          };
+    // 思否 API 端点 - 按优先级排序
+    // 1. 首先尝试 /api/users/-/info 接口（思否新版 API）
+    // 2. 然后尝试 /api/user/info 接口
+    // 3. 最后尝试从主页 HTML 中提取用户信息
+    
+    // 方法1: 尝试思否用户信息 API
+    const apiEndpoints = [
+      'https://segmentfault.com/api/users/-/info',
+      'https://segmentfault.com/api/user/info',
+      'https://segmentfault.com/api/user/-/info',
+      'https://segmentfault.com/gateway/user/-/info',
+    ];
+    
+    for (const endpoint of apiEndpoints) {
+      try {
+        const res = await fetchWithCookies(endpoint, {
+          headers: {
+            'Accept': 'application/json',
+            'Referer': 'https://segmentfault.com/',
+          },
+        });
+        
+        if (res.ok) {
+          const text = await res.text();
+          // 检查是否是 HTML（重定向到登录页）
+          if (text.startsWith('<!') || text.startsWith('<html')) {
+            logger.info('segmentfault', `API ${endpoint} 返回 HTML，跳过`);
+            continue;
+          }
+          
+          try {
+            const data = JSON.parse(text);
+            // 兼容多种响应格式
+            const user = data.data || data.user || data;
+            const isSuccess = data.status === 0 || data.code === 0 || data.success === true || 
+                             (user && (user.id || user.uid || user.slug || user.name));
+            
+            if (isSuccess && user && (user.id || user.uid || user.slug || user.name)) {
+              const userId = String(user.id || user.uid || user.slug || '');
+              // 思否 API 中 name 是 URL slug，nickname 才是真实显示名称
+              // 优先使用 nickname，其次是 nick，最后才是 name（slug）
+              const nickname = user.nickname || user.nick || user.name || user.username || '';
+              const avatar = user.avatar || user.avatarUrl || user.avatar_url || user.head || '';
+              
+              logger.info('segmentfault', `从 API ${endpoint} 获取到用户信息`, { userId, nickname });
+              return {
+                loggedIn: true,
+                platform: 'segmentfault',
+                userId: userId,
+                nickname: nickname || '思否用户',
+                avatar: avatar || undefined,
+                meta: {
+                  followersCount: user.followers || user.follower_count || user.followersCount,
+                  articlesCount: user.articles || user.article_count || user.articlesCount,
+                },
+                detectionMethod: 'api',
+              };
+            }
+          } catch (parseErr) {
+            logger.warn('segmentfault', `API ${endpoint} JSON 解析失败`, { error: (parseErr as Error).message });
+          }
         }
-        return null;
-      });
-    } catch (e: any) {
-      logger.error('segmentfault', 'API 调用失败', e);
-      return { loggedIn: false, platform: 'segmentfault', errorType: AuthErrorType.NETWORK_ERROR, error: e.message, retryable: true };
+      } catch (e: any) {
+        logger.warn('segmentfault', `API ${endpoint} 调用失败`, { error: e.message });
+      }
     }
+    
+    // 方法2: 从思否主页 HTML 中提取用户信息
+    logger.info('segmentfault', 'API 检测失败，尝试从 HTML 提取用户信息');
+    try {
+      const htmlResult = await fetchSegmentfaultUserFromHtml();
+      if (htmlResult.loggedIn) {
+        return htmlResult;
+      }
+    } catch (e: any) {
+      logger.warn('segmentfault', 'HTML 提取失败', { error: e.message });
+    }
+    
+    // 方法3: 使用 Cookie 检测（只能判断登录状态，无法获取用户信息）
+    logger.info('segmentfault', 'HTML 提取失败，尝试 Cookie 检测');
+    return detectViaCookies('segmentfault');
   },
 };
+
+/**
+ * 从思否主页 HTML 中提取用户信息
+ * 
+ * 思否网站在登录后，页面中会包含用户信息：
+ * 1. 全局变量 window.__INITIAL_STATE__ 或 window.__NUXT__
+ * 2. 页面 script 标签中的 JSON 数据
+ * 3. 用户头像和用户名的 DOM 元素
+ */
+async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
+  try {
+    const res = await fetchWithCookies('https://segmentfault.com/', {
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml',
+        'Referer': 'https://segmentfault.com/',
+      },
+    });
+    
+    if (!res.ok) {
+      return {
+        loggedIn: false,
+        platform: 'segmentfault',
+        error: `HTTP ${res.status}`,
+        errorType: AuthErrorType.API_ERROR,
+        retryable: true,
+        detectionMethod: 'html',
+      };
+    }
+    
+    const html = await res.text();
+    
+    // 1. 尝试从 __INITIAL_STATE__ 或 __NUXT__ 中提取
+    const statePatterns = [
+      /window\.__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|window\.)/,
+      /window\.__NUXT__\s*=\s*(\{[\s\S]*?\});?\s*(?:<\/script>|window\.)/,
+      /__INITIAL_STATE__["']?\s*:\s*(\{[\s\S]*?\})\s*[,}]/,
+    ];
+    
+    for (const pattern of statePatterns) {
+      const match = html.match(pattern);
+      if (match?.[1]) {
+        try {
+          const state = JSON.parse(match[1]);
+          // 尝试从不同路径获取用户信息
+          const user = state.user || state.currentUser || state.auth?.user || 
+                      state.global?.user || state.data?.user;
+          if (user && (user.id || user.uid || user.slug || user.name)) {
+            // 思否中 name 是 URL slug，nickname 才是真实显示名称
+            const displayName = user.nickname || user.nick || user.name || '';
+            logger.info('segmentfault', '从 __INITIAL_STATE__ 获取到用户信息', { nickname: displayName, slug: user.name });
+            return {
+              loggedIn: true,
+              platform: 'segmentfault',
+              userId: String(user.id || user.uid || user.slug || ''),
+              nickname: displayName || '思否用户',
+              avatar: user.avatar || user.avatarUrl || user.avatar_url,
+              detectionMethod: 'html',
+            };
+          }
+        } catch {}
+      }
+    }
+    
+    // 2. 尝试从 script 标签中的 JSON 数据提取
+    const scriptJsonPatterns = [
+      /"currentUser"\s*:\s*(\{[^}]+\})/,
+      /"user"\s*:\s*(\{[^}]+\})/,
+      /"userInfo"\s*:\s*(\{[^}]+\})/,
+    ];
+    
+    for (const pattern of scriptJsonPatterns) {
+      const match = html.match(pattern);
+      if (match?.[1]) {
+        try {
+          const user = JSON.parse(match[1]);
+          if (user && (user.id || user.uid || user.slug || user.name)) {
+            // 思否中 name 是 URL slug，nickname 才是真实显示名称
+            const displayName = user.nickname || user.nick || user.name || '';
+            logger.info('segmentfault', '从 script JSON 获取到用户信息', { nickname: displayName });
+            return {
+              loggedIn: true,
+              platform: 'segmentfault',
+              userId: String(user.id || user.uid || user.slug || ''),
+              nickname: displayName || '思否用户',
+              avatar: user.avatar || user.avatarUrl,
+              detectionMethod: 'html',
+            };
+          }
+        } catch {}
+      }
+    }
+    
+    // 3. 从 HTML DOM 结构中提取用户信息
+    // 思否登录后，页面右上角会显示用户头像和用户名
+    
+    // 提取用户头像 URL
+    const avatarPatterns = [
+      /class="[^"]*avatar[^"]*"[^>]*src="([^"]+)"/i,
+      /src="([^"]+)"[^>]*class="[^"]*avatar[^"]*"/i,
+      /class="[^"]*user-avatar[^"]*"[^>]*src="([^"]+)"/i,
+      /<img[^>]+src="(https?:\/\/[^"]*avatar[^"]*)"[^>]*>/i,
+      /avatar[^"]*"[^>]*style="[^"]*background-image:\s*url\(['"]?([^'")\s]+)['"]?\)/i,
+    ];
+    
+    let avatar: string | undefined;
+    for (const pattern of avatarPatterns) {
+      const match = html.match(pattern);
+      if (match?.[1] && !match[1].includes('default') && !match[1].includes('placeholder')) {
+        avatar = match[1];
+        break;
+      }
+    }
+    
+    // 提取用户名
+    const nicknamePatterns = [
+      /class="[^"]*user-?name[^"]*"[^>]*>([^<]+)</i,
+      /class="[^"]*nickname[^"]*"[^>]*>([^<]+)</i,
+      /href="\/u\/[^"]+"\s*[^>]*>([^<]+)</i,
+      /<a[^>]+href="\/u\/([^"]+)"[^>]*>/i,  // 从用户主页链接提取 slug
+    ];
+    
+    let nickname: string | undefined;
+    let userId: string | undefined;
+    for (const pattern of nicknamePatterns) {
+      const match = html.match(pattern);
+      if (match?.[1]) {
+        const value = match[1].trim();
+        if (value && value.length > 0 && value.length < 50 && !value.includes('<')) {
+          if (pattern.source.includes('href="\/u\/')) {
+            // 这是 slug，用作 userId
+            userId = value;
+          } else {
+            nickname = value;
+          }
+        }
+      }
+    }
+    
+    // 4. 检查是否有登录按钮（未登录标识）
+    const hasLoginButton = html.includes('登录') && 
+                          (html.includes('href="/user/login"') || html.includes('class="login'));
+    const hasLogoutButton = html.includes('退出') || html.includes('logout') || html.includes('signout');
+    
+    // 如果有退出按钮或用户头像，说明已登录
+    if (hasLogoutButton || avatar || (nickname && !hasLoginButton)) {
+      logger.info('segmentfault', '从 HTML DOM 判断已登录', { nickname, avatar: !!avatar });
+      return {
+        loggedIn: true,
+        platform: 'segmentfault',
+        userId: userId,
+        nickname: nickname || '思否用户',
+        avatar: avatar,
+        detectionMethod: 'html',
+      };
+    }
+    
+    // 未检测到登录状态
+    return {
+      loggedIn: false,
+      platform: 'segmentfault',
+      error: '未检测到登录状态',
+      errorType: AuthErrorType.LOGGED_OUT,
+      retryable: false,
+      detectionMethod: 'html',
+    };
+  } catch (e: any) {
+    logger.error('segmentfault', 'HTML 提取异常', e);
+    return {
+      loggedIn: false,
+      platform: 'segmentfault',
+      error: e.message,
+      errorType: AuthErrorType.NETWORK_ERROR,
+      retryable: true,
+      detectionMethod: 'html',
+    };
+  }
+}
 
 const oschinaApi: PlatformApiConfig = {
   id: 'oschina',
