@@ -238,7 +238,32 @@ function ensureConfigured() {
   };
 
   // 使用扩展
-  marked.use({ 
+  const originalEmStrong = marked.Tokenizer.prototype.emStrong;
+
+  marked.use({
+    tokenizer: {
+      emStrong(src: string, maskedSrc: string, prevChar?: string) {
+        const token = originalEmStrong.call(this as any, src, maskedSrc, prevChar);
+        if (token) return token;
+
+        // Fix: allow `_text_` emphasis after non-ASCII chars (e.g. Chinese)
+        if (!src.startsWith('_') || src.startsWith('__')) return;
+        if (!prevChar || prevChar.charCodeAt(0) <= 0x7f) return;
+
+        const match = /^_([^\s_](?:[^\n]*?[^\s_])?)_/.exec(src);
+        if (!match) return;
+
+        const nextChar = src[match[0].length];
+        if (nextChar && /[A-Za-z0-9_]/.test(nextChar)) return;
+
+        return {
+          type: 'em',
+          raw: match[0],
+          text: match[1],
+          tokens: (this as any).lexer.inlineTokens(match[1]),
+        } as Tokens.Em;
+      },
+    },
     extensions: [mathBlock, mathInline, mathBlockRenderer, mathInlineRenderer],
   });
   
