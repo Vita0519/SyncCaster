@@ -164,10 +164,10 @@
 
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useMessage } from 'naive-ui';
 import { db, type Account, ChromeStorageBridge, type SyncCasterArticle, AccountStatus } from '@synccaster/core';
-import { renderMarkdownPreview } from '../utils/markdown-preview';
+import { renderMarkdownPreview, processMermaidInContainer } from '../utils/markdown-preview';
 import '../markdown-preview.css';
 
 defineProps<{ isDark?: boolean }>();
@@ -304,6 +304,19 @@ const previewHtml = computed(() => {
   if (!body.value) return '<p class="empty-hint">暂无内容</p>';
   try { return renderMarkdownPreview(body.value); }
   catch { return '<pre class="error-hint">Markdown 解析失败</pre>'; }
+});
+
+// 监听预览内容变化，处理 Mermaid 图表渲染
+watch(previewHtml, async () => {
+  await nextTick();
+  const container = previewRef.value?.querySelector('.markdown-preview');
+  if (container) {
+    try {
+      await processMermaidInContainer(container as HTMLElement);
+    } catch {
+      // Mermaid 渲染失败，静默处理
+    }
+  }
 });
 
 function showCopySuccess(msg: string = '已复制到剪贴板') {

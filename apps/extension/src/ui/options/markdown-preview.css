@@ -127,3 +127,123 @@
 .markdown-preview li {
   margin: 0.25em 0;
 }
+
+/* 任务列表样式 */
+.markdown-preview .task-list-item {
+  list-style: none;
+  margin-left: -1.5em;
+  padding-left: 0;
+}
+
+.markdown-preview .task-list-checkbox {
+  margin-right: 0.5em;
+  vertical-align: middle;
+  width: 16px;
+  height: 16px;
+  cursor: default;
+}
+
+/* 斜体样式 */
+.markdown-preview em,
+.markdown-preview i {
+  font-style: italic;
+}
+
+/* 删除线样式 */
+.markdown-preview del,
+.markdown-preview s,
+.markdown-preview strike {
+  text-decoration: line-through;
+  color: #6b7280;
+}
+
+/* 嵌套列表样式 */
+.markdown-preview ul ul,
+.markdown-preview ul ol,
+.markdown-preview ol ul,
+.markdown-preview ol ol {
+  margin: 0.25em 0;
+  padding-left: 1.5em;
+}
+
+.markdown-preview li > ul,
+.markdown-preview li > ol {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+/* 数学公式样式 */
+.markdown-preview .md-math {
+  font-family: 'KaTeX_Main', 'Times New Roman', serif;
+}
+
+.markdown-preview .md-math-block {
+  display: block;
+  margin: 1em 0;
+  padding: 0.75em 1em;
+  background: #f9fafb;
+  border-radius: 8px;
+  overflow-x: auto;
+  text-align: center;
+}
+
+.markdown-preview .md-math-inline {
+  display: inline;
+  padding: 0 0.15em;
+}
+
+.markdown-preview .md-math-error {
+  color: #ef4444;
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+/* Mermaid 图表样式 */
+.markdown-preview .md-mermaid {
+  margin: 1em 0;
+  padding: 1em;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.markdown-preview .mermaid-source {
+  margin: 0;
+  padding: 0.75em;
+  background: #f3f4f6;
+  border-radius: 6px;
+  font-size: 0.85em;
+}
+
+.markdown-preview .mermaid-source code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.markdown-preview .mermaid-loading {
+  padding: 0.5em;
+  color: #6b7280;
+  font-size: 0.9em;
+  text-align: center;
+}
+
+.markdown-preview .mermaid-rendered {
+  display: flex;
+  justify-content: center;
+  padding: 0.5em 0;
+}
+
+.markdown-preview .mermaid-rendered svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-preview .mermaid-error {
+  color: #ef4444;
+  background: #fef2f2;
+  padding: 0.5em 1em;
+  border-radius: 6px;
+  font-size: 0.9em;
+}

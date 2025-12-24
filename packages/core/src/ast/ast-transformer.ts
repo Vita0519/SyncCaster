@@ -18,6 +18,7 @@ import type {
   TableNode,
   MathBlockNode,
   MathInlineNode,
+  MermaidBlockNode,
   ImageBlockNode,
   ImageInlineNode,
   EmbedBlockNode,

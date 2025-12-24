@@ -23,11 +23,46 @@ describe('MDH Core Renderer', () => {
       expect(result.html).toContain('<code>code</code>');
     });
 
+    it('should render underscore italic syntax', () => {
+      const result = renderMarkdownToHtml('_斜体文本_');
+      expect(result.html).toContain('<em>斜体文本</em>');
+    });
+
+    it('should render nested italic in bold', () => {
+      const result = renderMarkdownToHtml('**粗体中的 _斜体_ 文本**');
+      expect(result.html).toContain('<strong>');
+      expect(result.html).toContain('<em>斜体</em>');
+    });
+
     it('should render lists', () => {
       const result = renderMarkdownToHtml('- item 1\n- item 2\n\n1. first\n2. second');
       expect(result.html).toContain('<ul>');
       expect(result.html).toContain('<li>');
       expect(result.html).toContain('<ol>');
+    });
+
+    it('should render nested unordered lists', () => {
+      const markdown = `- 项目 C
+  - 子项目 C1
+  - 子项目 C2`;
+      const result = renderMarkdownToHtml(markdown);
+      // 应该有嵌套的 ul
+      expect(result.html).toContain('<ul>');
+      expect(result.html).toContain('项目 C');
+      expect(result.html).toContain('子项目 C1');
+      expect(result.html).toContain('子项目 C2');
+      // 验证嵌套结构：内部 ul 应该在 li 内
+      expect(result.html).toMatch(/<li>[\s\S]*项目 C[\s\S]*<ul>[\s\S]*子项目 C1/);
+    });
+
+    it('should render deeply nested lists', () => {
+      const markdown = `- Level 1
+  - Level 2
+    - Level 3`;
+      const result = renderMarkdownToHtml(markdown);
+      // 应该有三层嵌套
+      const ulCount = (result.html.match(/<ul>/g) || []).length;
+      expect(ulCount).toBeGreaterThanOrEqual(3);
     });
 
     it('should render code blocks with highlighting', () => {

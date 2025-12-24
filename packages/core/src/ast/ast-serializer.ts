@@ -19,6 +19,7 @@ import type {
   ListNode,
   ListItemNode,
   CodeBlockNode,
+  MermaidBlockNode,
   MathBlockNode,
   ThematicBreakNode,
   ImageBlockNode,
@@ -120,6 +121,9 @@ function serializeBlockToMd(
     
     case 'codeBlock':
       return serializeCodeBlockToMd(node, opts);
+    
+    case 'mermaidBlock':
+      return serializeMermaidBlockToMd(node as MermaidBlockNode, opts);
     
     case 'mathBlock':
       return serializeMathBlockToMd(node, opts);
@@ -231,6 +235,12 @@ function serializeCodeBlockToMd(node: CodeBlockNode, opts: SerializeOptions): st
   const meta = node.meta || '';
   const fence = '```';
   return `${fence}${lang}${meta ? ' ' + meta : ''}\n${node.value}\n${fence}`;
+}
+
+function serializeMermaidBlockToMd(node: MermaidBlockNode, opts: SerializeOptions): string {
+  const fence = '```';
+  // Mermaid 图输出为 mermaid 代码块
+  return `${fence}mermaid\n${node.code}\n${fence}`;
 }
 
 function serializeMathBlockToMd(node: MathBlockNode, opts: SerializeOptions): string {
@@ -434,6 +444,12 @@ function serializeBlockToHtml(node: BlockNode, opts: SerializeOptions): string {
       const lang = node.lang ? ` class="language-${node.lang}"` : '';
       const escaped = escapeHtml(node.value);
       return `<pre><code${lang}>${escaped}</code></pre>`;
+    }
+    
+    case 'mermaidBlock': {
+      const mermaidNode = node as MermaidBlockNode;
+      // 输出为带有 mermaid 类的 pre 元素，便于前端渲染
+      return `<pre class="mermaid">${escapeHtml(mermaidNode.code)}</pre>`;
     }
     
     case 'mathBlock':

@@ -26,6 +26,10 @@ export interface PlatformRule {
     codeHighlight?: 'prism' | 'highlight.js' | 'custom';
     /** 图片懒加载属性 */
     lazyLoadAttr?: string;
+    /** Mermaid 容器选择器 */
+    mermaidSelector?: string;
+    /** Mermaid 源码属性 */
+    mermaidSourceAttr?: string;
   };
 }
 
@@ -52,6 +56,7 @@ export const platformRules: PlatformRule[] = [
       mathEngine: 'katex',
       codeHighlight: 'prism',
       lazyLoadAttr: 'data-src',
+      mermaidSelector: '.mermaid, .markdown-mermaid',
     },
   },
   {
@@ -73,6 +78,8 @@ export const platformRules: PlatformRule[] = [
       mathEngine: 'mathjax2',
       codeHighlight: 'highlight.js',
       lazyLoadAttr: 'data-src',
+      mermaidSelector: '.mermaid-box, .mermaid',
+      mermaidSourceAttr: 'data-source',
     },
   },
   {

@@ -137,6 +137,16 @@ export interface CodeBlockNode extends BaseNode {
   value: string;
 }
 
+/**
+ * Mermaid 图节点
+ * 用于表示 Mermaid 语法绘制的流程图、时序图等
+ */
+export interface MermaidBlockNode extends BaseNode {
+  type: 'mermaidBlock';
+  code: string;           // Mermaid 源码
+  diagramType?: string;   // 图类型：flowchart, sequenceDiagram, classDiagram 等
+}
+
 export interface MathBlockNode extends BaseNode {
   type: 'mathBlock';
   tex: string;
@@ -232,6 +242,7 @@ export type BlockNode =
   | ListNode
   | ListItemNode
   | CodeBlockNode
+  | MermaidBlockNode
   | MathBlockNode
   | ThematicBreakNode
   | ImageBlockNode
@@ -328,7 +339,7 @@ export function isInlineNode(node: CanonicalNode): node is InlineNode {
 export function isBlockNode(node: CanonicalNode): node is BlockNode {
   return [
     'paragraph', 'heading', 'blockquote', 'list', 'listItem',
-    'codeBlock', 'mathBlock', 'thematicBreak', 'imageBlock',
+    'codeBlock', 'mermaidBlock', 'mathBlock', 'thematicBreak', 'imageBlock',
     'table', 'tableRow', 'tableCell', 'htmlBlock', 'embedBlock',
     'footnoteDef', 'toc', 'frontmatter', 'customBlock'
   ].includes(node.type);

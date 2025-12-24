@@ -13,13 +13,16 @@ import {
   checkQuality,
   normalizeBlockSpacing,
   normalizeMathInDom,
+  normalizeMermaidInDom,
+  extractMermaidBlocks,
+  normalizeTaskListInDom,
 } from './collector-utils';
 import { initAuthDetector, detectLoginState, startLoginPolling } from './auth-detector';
 import { collectContentCanonical } from './canonical-collector';
 
 const COLLECT_CONFIG = {
   readability: { keepClasses: true, maxElemsToParse: 10000, nbTopCandidates: 10 },
-  quality: { images: 0.3, formulas: 0.5, tables: 0.5 },
+  quality: { images: 0.3, formulas: 0.5, tables: 0.5, mermaid: 0.5 },
 };
 
 function logInfo(scope: string, msg: string, extra?: unknown) {
@@ -656,9 +659,47 @@ async function collectContent() {
 
     const formulas = extractFormulas(container);
     flattenCodeHighlights(container);
-    cleanDOMWithWhitelist(container);
-    const images = extractAndNormalizeImages(container);
-    normalizeBlockSpacing(container);
+    
+    // Mermaid 图预处理 - 在清洗之前进行
+    try {
+      normalizeMermaidInDom(container);
+    } catch (e) {
+      console.error('[content:collect] Mermaid 预处理异常:', e);
+    }
+    
+    let mermaidBlocks: { type: 'mermaid'; code: string; diagramType?: string }[] = [];
+    try {
+      mermaidBlocks = extractMermaidBlocks(container);
+    } catch (e) {
+      console.error('[content:collect] Mermaid 提取异常:', e);
+    }
+    logInfo('collect', 'Mermaid 图提取', { count: mermaidBlocks.length });
+    
+    // 任务列表预处理 - 在清洗之前进行
+    try {
+      normalizeTaskListInDom(container);
+    } catch (e) {
+      console.error('[content:collect] 任务列表预处理异常:', e);
+    }
+    
+    try {
+      cleanDOMWithWhitelist(container);
+    } catch (e) {
+      console.error('[content:collect] DOM 清洗异常:', e);
+    }
+    
+    let images: ReturnType<typeof extractAndNormalizeImages> = [];
+    try {
+      images = extractAndNormalizeImages(container);
+    } catch (e) {
+      console.error('[content:collect] 图片提取异常:', e);
+    }
+    
+    try {
+      normalizeBlockSpacing(container);
+    } catch (e) {
+      console.error('[content:collect] 段落归一化异常:', e);
+    }
 
     body_html = container.innerHTML;
     const td = new TurndownService({
@@ -669,8 +710,10 @@ async function collectContent() {
     const DS = String.fromCharCode(36);
     
     td.addRule('sync-math', {
-      filter: (node: Node) => node.nodeType === 1 && (node as Element).hasAttribute('data-sync-math'),
-      replacement: (_content: string, node: Node) => {
+      filter: (node: HTMLElement) => {
+        return node.nodeType === 1 && (node as Element).hasAttribute('data-sync-math');
+      },
+      replacement: (_content: string, node: HTMLElement) => {
         const el = node as Element;
         const tex = el.getAttribute('data-tex') || '';
         const display = el.getAttribute('data-display') === 'true';
@@ -679,27 +722,130 @@ async function collectContent() {
     });
 
     td.addRule('katex-fallback', {
-      filter: (node: Node) => {
+      filter: (node: HTMLElement) => {
         if (node.nodeType !== 1) return false;
         const el = node as Element;
-        return el.classList.contains('katex') || el.classList.contains('katex-display') || el.classList.contains('katex--display');
+        return el.classList?.contains('katex') || el.classList?.contains('katex-display') || el.classList?.contains('katex--display');
       },
-      replacement: (_content: string, node: Node) => {
+      replacement: (_content: string, node: HTMLElement) => {
         const el = node as Element;
         const annotation = el.querySelector('annotation[encoding="application/x-tex"]');
         const tex = annotation?.textContent?.trim() || '';
         if (!tex) return _content;
-        const isDisplay = el.classList.contains('katex-display') || el.classList.contains('katex--display');
+        const isDisplay = el.classList?.contains('katex-display') || el.classList?.contains('katex--display');
         return isDisplay ? '\n\n' + DS + DS + '\n' + tex + '\n' + DS + DS + '\n\n' : DS + tex + DS;
       },
     });
 
     td.addRule('complex-table', {
-      filter: (node: Node) => {
+      filter: (node: HTMLElement) => {
         if (node.nodeName !== 'TABLE') return false;
         return !!(node as HTMLTableElement).querySelector('colgroup, [colspan], [rowspan]');
       },
-      replacement: (_content: string, node: Node) => '\n\n' + (node as Element).outerHTML + '\n\n',
+      replacement: (_content: string, node: HTMLElement) => '\n\n' + (node as Element).outerHTML + '\n\n',
+    });
+
+    // Mermaid 图规则 - 将 Mermaid 容器转换为代码块
+    td.addRule('mermaid-block', {
+      filter: (node: HTMLElement) => {
+        if (node.nodeType !== 1) return false;
+        const el = node as Element;
+        // 检查是否是 Mermaid 预处理后的标记
+        if (el.hasAttribute && el.hasAttribute('data-sync-mermaid')) return true;
+        // 检查是否是 language-mermaid 代码块
+        if (el.tagName === 'CODE' && el.classList?.contains('language-mermaid')) return true;
+        // 检查是否是 mermaid 类的容器
+        if (el.classList?.contains('mermaid')) return true;
+        return false;
+      },
+      replacement: (_content: string, node: HTMLElement) => {
+        const el = node as Element;
+        let code = '';
+        
+        // 从预处理标记获取代码
+        if (el.hasAttribute && el.hasAttribute('data-sync-mermaid')) {
+          const codeEl = el.querySelector('code');
+          code = codeEl?.textContent || '';
+        } else if (el.tagName === 'CODE') {
+          code = el.textContent || '';
+        } else if (el.classList?.contains('mermaid')) {
+          // 尝试从 data 属性获取（保留原始格式）
+          code = el.getAttribute('data-mermaid-source') || 
+                 el.getAttribute('data-source') ||
+                 el.getAttribute('data-graph-code') || '';
+          // 如果 data 属性没有，且没有 SVG，尝试从 textContent 获取
+          if (!code && !el.querySelector('svg')) {
+            code = el.textContent || '';
+          }
+        }
+        
+        if (!code.trim()) return _content;
+        
+        return '\n\n```mermaid\n' + code.trim() + '\n```\n\n';
+      },
+    });
+
+    // 任务列表规则 - 处理带 checkbox 的列表项
+    td.addRule('taskListItem', {
+      filter: (node: HTMLElement) => {
+        if (node.nodeName !== 'LI') return false;
+        // 检查是否包含 checkbox input
+        const checkbox = node.querySelector('input[type="checkbox"]');
+        if (checkbox) return true;
+        // 检查是否有任务列表相关的类名
+        if (node.classList?.contains('task-list-item')) return true;
+        // 检查 data 属性
+        if (node.hasAttribute('data-task')) return true;
+        return false;
+      },
+      replacement: (content: string, node: HTMLElement) => {
+        const checkbox = node.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+        const isChecked = checkbox?.checked || 
+                          checkbox?.hasAttribute('checked') ||
+                          node.getAttribute('data-checked') === 'true' ||
+                          node.classList?.contains('checked') ||
+                          node.classList?.contains('completed');
+        
+        // 移除 content 开头可能残留的 checkbox 文本
+        let cleanContent = content.replace(/^\s*\[[ x]\]\s*/i, '').trim();
+        
+        const marker = isChecked ? '[x]' : '[ ]';
+        return '- ' + marker + ' ' + cleanContent + '\n';
+      },
+    });
+
+    // 删除线规则 - 确保 del/s/strike 标签正确转换
+    td.addRule('strikethrough', {
+      filter: ['del', 's', 'strike'],
+      replacement: (content: string) => {
+        if (!content.trim()) return '';
+        return '~~' + content + '~~';
+      },
+    });
+
+    // 斜体规则 - 确保 em/i 标签正确转换（优先级高于默认规则）
+    td.addRule('emphasis', {
+      filter: (node: HTMLElement) => {
+        const tagName = node.nodeName.toLowerCase();
+        // 匹配 em, i 标签
+        if (tagName === 'em' || tagName === 'i') return true;
+        // 匹配带有斜体样式的 span
+        if (tagName === 'span') {
+          const style = node.getAttribute('style') || '';
+          if (style.includes('italic') || style.includes('oblique')) return true;
+          // 检查 class
+          if (node.classList?.contains('italic') || node.classList?.contains('em')) return true;
+        }
+        return false;
+      },
+      replacement: (content: string) => {
+        if (!content.trim()) return '';
+        // 避免嵌套的下划线问题
+        const trimmed = content.trim();
+        // 如果内容已经被下划线包裹，不再添加
+        if (trimmed.startsWith('_') && trimmed.endsWith('_')) return trimmed;
+        return '_' + trimmed + '_';
+      },
     });
 
     let body_md = td.turndown(body_html || '');
@@ -711,20 +857,24 @@ async function collectContent() {
     const finalMetrics = computeMetrics(body_html);
     const qualityCheck = checkQuality(initialMetrics, finalMetrics, COLLECT_CONFIG.quality);
 
-    logInfo('collect', '采集成功', { title, len: text_len, images: images.length, formulas: formulas.length });
+    logInfo('collect', '采集成功', { title, len: text_len, images: images.length, formulas: formulas.length, mermaid: mermaidBlocks.length });
 
     return {
       success: true,
       data: {
         title, url, summary, body_md, body_html, images,
         formulas: formulas.map(f => ({ type: f.display ? 'blockMath' : 'inlineMath', latex: f.latex, originalFormat: f.originalFormat })),
-        wordCount: text_len, imageCount: images.length, formulaCount: formulas.length,
+        mermaid: mermaidBlocks.map(m => ({ code: m.code, diagramType: m.diagramType })),
+        wordCount: text_len, imageCount: images.length, formulaCount: formulas.length, mermaidCount: mermaidBlocks.length,
         useHtmlFallback: !qualityCheck.pass, qualityCheck,
       },
     };
   } catch (error: unknown) {
-    logInfo('collect', '采集异常', { error });
-    return { success: false, error: error instanceof Error ? error.message : '未知错误' };
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : '';
+    console.error('[content:collect] 采集异常详情:', errorMessage, errorStack);
+    logInfo('collect', '采集异常', { error: errorMessage, stack: errorStack });
+    return { success: false, error: errorMessage };
   }
 }
 

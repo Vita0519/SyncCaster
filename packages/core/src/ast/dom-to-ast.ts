@@ -19,6 +19,7 @@ import type {
   ListNode,
   ListItemNode,
   CodeBlockNode,
+  MermaidBlockNode,
   MathBlockNode,
   ThematicBreakNode,
   ImageBlockNode,
@@ -222,6 +223,10 @@ function convertElement(
     return ctx.options.customHandlers[tagName](el, ctx);
   }
   
+  // Mermaid 图检测（优先处理）
+  const mermaidNode = tryConvertMermaid(el, ctx);
+  if (mermaidNode) return mermaidNode;
+  
   // 公式检测（优先处理）
   const mathNode = tryConvertMath(el, ctx);
   if (mathNode) return mathNode;
@@ -268,7 +273,7 @@ function convertElement(
     case 'img':
       return convertImage(el, ctx, expectedType);
     
-    // 内联元素
+    // 内联元素 - 富文本样式
     case 'strong': case 'b':
       return convertStrong(el, ctx);
     case 'em': case 'i':
@@ -281,6 +286,20 @@ function convertElement(
       return convertLink(el, ctx);
     case 'br':
       return { type: 'break' } as BreakNode;
+    
+    // 额外的富文本样式标签支持
+    case 'u': case 'ins':
+      // 下划线/插入文本 - 转换为强调（Markdown 不支持下划线）
+      return convertEmphasis(el, ctx);
+    case 'mark':
+      // 高亮文本 - 转换为强调
+      return convertEmphasis(el, ctx);
+    case 'sub':
+      // 下标 - 保留为 HTML
+      return { type: 'htmlInline', value: el.outerHTML } as HtmlInlineNode;
+    case 'sup':
+      // 上标 - 保留为 HTML
+      return { type: 'htmlInline', value: el.outerHTML } as HtmlInlineNode;
     
     // 容器元素（透传子节点）
     case 'div': case 'section': case 'article': case 'main': case 'span':
@@ -349,11 +368,21 @@ function convertListItem(el: Element, ctx: ConversionContext): ListItemNode {
   return { type: 'listItem', checked, children: wrappedChildren };
 }
 
-function convertCodeBlock(el: Element, ctx: ConversionContext): CodeBlockNode {
+function convertCodeBlock(el: Element, ctx: ConversionContext): CodeBlockNode | MermaidBlockNode {
   const codeEl = el.querySelector('code') || el;
   const langMatch = codeEl.className.match(/language-(\w+)/);
   const lang = langMatch?.[1] || codeEl.getAttribute('data-lang') || '';
   const value = codeEl.textContent || '';
+  
+  // 检查是否是 Mermaid 代码块
+  if (lang.toLowerCase() === 'mermaid') {
+    const diagramType = detectMermaidDiagramType(value);
+    return { 
+      type: 'mermaidBlock', 
+      code: value,
+      diagramType,
+    };
+  }
   
   return { type: 'codeBlock', lang: lang || undefined, value };
 }
@@ -482,6 +511,302 @@ function convertTableRow(tr: Element, ctx: ConversionContext, isHeader: boolean)
   }
   
   return { type: 'tableRow', children: cells };
+}
+
+
+// ========== Mermaid 图转换 ==========
+
+/**
+ * 检测 Mermaid 图类型
+ */
+function detectMermaidDiagramType(code: string): string | undefined {
+  const trimmed = code.trim().toLowerCase();
+  
+  // 常见 Mermaid 图类型关键字
+  const diagramTypes: Record<string, RegExp> = {
+    'flowchart': /^(flowchart|graph)\s+(tb|bt|lr|rl|td)/i,
+    'sequenceDiagram': /^sequencediagram/i,
+    'classDiagram': /^classdiagram/i,
+    'stateDiagram': /^statediagram/i,
+    'erDiagram': /^erdiagram/i,
+    'gantt': /^gantt/i,
+    'pie': /^pie/i,
+    'journey': /^journey/i,
+    'gitGraph': /^gitgraph/i,
+    'mindmap': /^mindmap/i,
+    'timeline': /^timeline/i,
+    'quadrantChart': /^quadrantchart/i,
+    'sankey': /^sankey/i,
+  };
+  
+  for (const [type, pattern] of Object.entries(diagramTypes)) {
+    if (pattern.test(trimmed)) {
+      return type;
+    }
+  }
+  
+  return undefined;
+}
+
+/**
+ * 尝试将元素转换为 Mermaid 图节点
+ * 
+ * 检测策略：
+ * 1. 带有 mermaid 类名的容器（渲染后的 Mermaid 图）
+ * 2. data-mermaid 属性
+ * 3. SVG 内嵌的 Mermaid 图（通过特征检测）
+ * 4. 特定平台的 Mermaid 容器
+ */
+function tryConvertMermaid(el: Element, ctx: ConversionContext): MermaidBlockNode | null {
+  // 1. 检查 mermaid 类名（最常见的渲染后格式）
+  if (el.classList.contains('mermaid')) {
+    const code = extractMermaidSource(el);
+    if (code) {
+      return {
+        type: 'mermaidBlock',
+        code,
+        diagramType: detectMermaidDiagramType(code),
+      };
+    }
+    // 如果无法提取源码，尝试从 SVG 重建
+    const svgCode = extractMermaidFromSvg(el);
+    if (svgCode) {
+      return {
+        type: 'mermaidBlock',
+        code: svgCode,
+        diagramType: detectMermaidDiagramType(svgCode),
+        data: { reconstructed: true },
+      };
+    }
+  }
+  
+  // 2. 检查 data-mermaid 属性
+  const dataMermaid = el.getAttribute('data-mermaid') || el.getAttribute('data-processed');
+  if (dataMermaid === 'true' || el.hasAttribute('data-mermaid-source')) {
+    const code = el.getAttribute('data-mermaid-source') || extractMermaidSource(el);
+    if (code) {
+      return {
+        type: 'mermaidBlock',
+        code,
+        diagramType: detectMermaidDiagramType(code),
+      };
+    }
+  }
+  
+  // 3. 检查特定平台的 Mermaid 容器
+  // 掘金
+  if (el.classList.contains('mermaid-container') || el.classList.contains('markdown-mermaid')) {
+    const code = extractMermaidSource(el);
+    if (code) {
+      return {
+        type: 'mermaidBlock',
+        code,
+        diagramType: detectMermaidDiagramType(code),
+      };
+    }
+  }
+  
+  // CSDN
+  if (el.classList.contains('mermaid-box') || el.getAttribute('data-type') === 'mermaid') {
+    const code = extractMermaidSource(el);
+    if (code) {
+      return {
+        type: 'mermaidBlock',
+        code,
+        diagramType: detectMermaidDiagramType(code),
+      };
+    }
+  }
+  
+  // 4. 检查是否是包含 Mermaid SVG 的容器
+  const svg = el.querySelector('svg.mermaid, svg[id^="mermaid"]');
+  if (svg) {
+    const code = extractMermaidFromSvg(el);
+    if (code) {
+      return {
+        type: 'mermaidBlock',
+        code,
+        diagramType: detectMermaidDiagramType(code),
+        data: { reconstructed: true },
+      };
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * 从 Mermaid 容器提取源码
+ */
+function extractMermaidSource(el: Element): string | null {
+  // 1. 从 data 属性提取
+  const dataSource = el.getAttribute('data-mermaid-source') 
+    || el.getAttribute('data-source')
+    || el.getAttribute('data-code');
+  if (dataSource?.trim()) {
+    return dataSource.trim();
+  }
+  
+  // 2. 从隐藏的 pre/code 元素提取
+  const codeEl = el.querySelector('pre.mermaid-source, code.mermaid-source, [data-mermaid-code]');
+  if (codeEl?.textContent?.trim()) {
+    return codeEl.textContent.trim();
+  }
+  
+  // 3. 从 script 标签提取（某些平台将源码存储在 script 中）
+  const scriptEl = el.querySelector('script[type="text/mermaid"], script[type="application/mermaid"]');
+  if (scriptEl?.textContent?.trim()) {
+    return scriptEl.textContent.trim();
+  }
+  
+  // 4. 从相邻的隐藏元素提取
+  const prevEl = el.previousElementSibling;
+  if (prevEl?.classList.contains('mermaid-source') || prevEl?.hasAttribute('data-mermaid-source')) {
+    const code = prevEl.textContent?.trim();
+    if (code) return code;
+  }
+  
+  // 5. 检查元素本身是否包含未渲染的源码（渲染前的状态）
+  // Mermaid 渲染前，源码直接作为文本内容
+  if (!el.querySelector('svg') && el.textContent?.trim()) {
+    const text = el.textContent.trim();
+    // 验证是否看起来像 Mermaid 代码
+    if (looksLikeMermaidCode(text)) {
+      return text;
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * 从 SVG 尝试重建 Mermaid 源码
+ * 这是一个兜底策略，当无法获取原始源码时使用
+ */
+function extractMermaidFromSvg(el: Element): string | null {
+  const svg = el.querySelector('svg') || (el.tagName.toLowerCase() === 'svg' ? el : null);
+  if (!svg) return null;
+  
+  // 1. 检查 SVG 的 data 属性
+  const svgSource = svg.getAttribute('data-mermaid-source') || svg.getAttribute('data-source');
+  if (svgSource?.trim()) {
+    return svgSource.trim();
+  }
+  
+  // 2. 尝试从 SVG 内容重建（有限支持）
+  // 检测图类型
+  const svgContent = svg.innerHTML || '';
+  const svgClass = svg.getAttribute('class') || '';
+  
+  // 流程图检测
+  if (svgClass.includes('flowchart') || svgContent.includes('flowchart-')) {
+    return reconstructFlowchartFromSvg(svg);
+  }
+  
+  // 时序图检测
+  if (svgClass.includes('sequence') || svgContent.includes('actor') || svgContent.includes('messageLine')) {
+    return reconstructSequenceDiagramFromSvg(svg);
+  }
+  
+  // 其他类型：返回占位符，标记需要手动处理
+  const diagramType = detectDiagramTypeFromSvg(svg);
+  if (diagramType) {
+    return `%% Mermaid ${diagramType} - 需要手动重建\n%% 原始图已渲染为 SVG，源码无法自动提取`;
+  }
+  
+  return null;
+}
+
+/**
+ * 从 SVG 检测 Mermaid 图类型
+ */
+function detectDiagramTypeFromSvg(svg: Element): string | null {
+  const svgClass = svg.getAttribute('class') || '';
+  const svgId = svg.getAttribute('id') || '';
+  const content = svg.innerHTML || '';
+  
+  if (svgClass.includes('flowchart') || svgId.includes('flowchart')) return 'flowchart';
+  if (svgClass.includes('sequence') || content.includes('actor')) return 'sequenceDiagram';
+  if (svgClass.includes('class') || content.includes('classGroup')) return 'classDiagram';
+  if (svgClass.includes('state') || content.includes('stateGroup')) return 'stateDiagram';
+  if (svgClass.includes('er') || content.includes('erBox')) return 'erDiagram';
+  if (svgClass.includes('gantt') || content.includes('gantt')) return 'gantt';
+  if (svgClass.includes('pie') || content.includes('pieCircle')) return 'pie';
+  if (svgClass.includes('git') || content.includes('commit')) return 'gitGraph';
+  
+  return null;
+}
+
+/**
+ * 从流程图 SVG 重建 Mermaid 源码（简化版）
+ */
+function reconstructFlowchartFromSvg(svg: Element): string | null {
+  const nodes: string[] = [];
+  const edges: string[] = [];
+  
+  // 提取节点
+  svg.querySelectorAll('.node, .flowchart-node, [class*="node"]').forEach((node, index) => {
+    const label = node.querySelector('.nodeLabel, .label')?.textContent?.trim() || `Node${index}`;
+    const id = node.getAttribute('id') || `node${index}`;
+    nodes.push(`    ${id}[${label}]`);
+  });
+  
+  // 提取边（简化处理）
+  svg.querySelectorAll('.edgePath, .flowchart-link, path[class*="edge"]').forEach((edge, index) => {
+    // 边的重建比较复杂，这里只做标记
+    edges.push(`    %% edge${index}`);
+  });
+  
+  if (nodes.length === 0) return null;
+  
+  return `flowchart TD\n${nodes.join('\n')}\n    %% 边连接需要手动补充`;
+}
+
+/**
+ * 从时序图 SVG 重建 Mermaid 源码（简化版）
+ */
+function reconstructSequenceDiagramFromSvg(svg: Element): string | null {
+  const actors: string[] = [];
+  const messages: string[] = [];
+  
+  // 提取参与者
+  svg.querySelectorAll('.actor, [class*="actor"]').forEach((actor) => {
+    const name = actor.textContent?.trim();
+    if (name && !actors.includes(`    participant ${name}`)) {
+      actors.push(`    participant ${name}`);
+    }
+  });
+  
+  if (actors.length === 0) return null;
+  
+  return `sequenceDiagram\n${actors.join('\n')}\n    %% 消息需要手动补充`;
+}
+
+/**
+ * 检查文本是否看起来像 Mermaid 代码
+ */
+function looksLikeMermaidCode(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  
+  // 检查是否以 Mermaid 图类型关键字开头
+  const mermaidKeywords = [
+    'flowchart', 'graph', 'sequencediagram', 'classdiagram',
+    'statediagram', 'erdiagram', 'gantt', 'pie', 'journey',
+    'gitgraph', 'mindmap', 'timeline', 'quadrantchart', 'sankey'
+  ];
+  
+  for (const keyword of mermaidKeywords) {
+    if (trimmed.startsWith(keyword)) {
+      return true;
+    }
+  }
+  
+  // 检查是否包含 Mermaid 特有的语法
+  if (/-->/g.test(text) && /\[.*\]/g.test(text)) {
+    return true; // 流程图语法
+  }
+  
+  return false;
 }
 
 

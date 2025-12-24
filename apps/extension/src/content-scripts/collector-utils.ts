@@ -22,11 +22,18 @@ export interface CollectedFormula {
   originalFormat?: string;
 }
 
+export interface CollectedMermaid {
+  type: 'mermaid';
+  code: string;
+  diagramType?: string;
+}
+
 export interface ContentMetrics {
   images: number;
   formulas: number;
   tables: number;
   codeBlocks: number;
+  mermaidBlocks: number;
   textLen: number;
 }
 
@@ -35,7 +42,7 @@ export interface QualityCheck {
   reason?: string;
   initialMetrics: ContentMetrics;
   finalMetrics: ContentMetrics;
-  lossRatio: { images: number; formulas: number; tables: number };
+  lossRatio: { images: number; formulas: number; tables: number; mermaid: number };
 }
 
 // ========== 质量指标计算 ==========
@@ -47,6 +54,7 @@ export function computeMetrics(html: string): ContentMetrics {
     formulas: tmp.querySelectorAll('.katex, mjx-container, math, [data-sync-math]').length,
     tables: tmp.querySelectorAll('table').length,
     codeBlocks: tmp.querySelectorAll('pre > code, pre[class*="language-"]').length,
+    mermaidBlocks: tmp.querySelectorAll('.mermaid, [data-mermaid], pre code.language-mermaid').length,
     textLen: (tmp.textContent || '').trim().length,
   };
 }
@@ -553,6 +561,477 @@ export function normalizeMathInDom(root: HTMLElement): void {
   console.log('[math] normalizeMathInDom completed');
 }
 
+// ========== Mermaid DOM 预处理 ==========
+
+/**
+ * 预处理 DOM 中的 Mermaid 图
+ * 将渲染后的 Mermaid SVG 转换为可识别的标记
+ */
+export function normalizeMermaidInDom(root: HTMLElement): void {
+  const doc = root.ownerDocument || document;
+  const processed = new WeakSet<Element>();
+  
+  console.log('[mermaid] Starting normalizeMermaidInDom');
+  
+  const createPlaceholder = (code: string, diagramType?: string): HTMLElement => {
+    const wrapper = doc.createElement('pre');
+    const codeEl = doc.createElement('code');
+    codeEl.className = 'language-mermaid';
+    codeEl.textContent = code;
+    wrapper.appendChild(codeEl);
+    wrapper.setAttribute('data-sync-mermaid', 'true');
+    if (diagramType) {
+      wrapper.setAttribute('data-diagram-type', diagramType);
+    }
+    return wrapper;
+  };
+  
+  // 1. 处理带有 mermaid 类的容器
+  root.querySelectorAll('.mermaid').forEach((node) => {
+    if (processed.has(node)) return;
+    processed.add(node);
+    
+    const code = extractMermaidSourceFromElement(node);
+    if (code) {
+      const diagramType = detectMermaidType(code);
+      console.log('[mermaid] Replacing mermaid container, type:', diagramType);
+      node.replaceWith(createPlaceholder(code, diagramType));
+    }
+  });
+  
+  // 2. 处理 data-mermaid 属性的元素
+  root.querySelectorAll('[data-mermaid="true"], [data-processed="true"]').forEach((node) => {
+    if (processed.has(node)) return;
+    if (node.classList.contains('mermaid')) return; // 已处理
+    processed.add(node);
+    
+    const code = node.getAttribute('data-mermaid-source') || extractMermaidSourceFromElement(node);
+    if (code) {
+      const diagramType = detectMermaidType(code);
+      node.replaceWith(createPlaceholder(code, diagramType));
+    }
+  });
+  
+  // 3. 处理特定平台的 Mermaid 容器
+  const platformSelectors = [
+    '.mermaid-container',
+    '.markdown-mermaid',
+    '.mermaid-box',
+    '[data-type="mermaid"]',
+  ];
+  
+  platformSelectors.forEach((selector) => {
+    root.querySelectorAll(selector).forEach((node) => {
+      if (processed.has(node)) return;
+      processed.add(node);
+      
+      const code = extractMermaidSourceFromElement(node);
+      if (code) {
+        const diagramType = detectMermaidType(code);
+        console.log('[mermaid] Replacing platform mermaid container:', selector);
+        node.replaceWith(createPlaceholder(code, diagramType));
+      }
+    });
+  });
+  
+  // 4. 处理包含 Mermaid SVG 的容器
+  root.querySelectorAll('svg.mermaid, svg[id^="mermaid"]').forEach((svg) => {
+    const parent = svg.parentElement;
+    if (!parent || processed.has(parent)) return;
+    processed.add(parent);
+    
+    const code = extractMermaidSourceFromSvg(svg);
+    if (code) {
+      const diagramType = detectMermaidType(code);
+      console.log('[mermaid] Replacing SVG mermaid, type:', diagramType);
+      parent.replaceWith(createPlaceholder(code, diagramType));
+    }
+  });
+  
+  console.log('[mermaid] normalizeMermaidInDom completed');
+}
+
+/**
+ * 从元素提取 Mermaid 源码
+ * 优先从结构化数据源提取，保留原始换行和格式
+ */
+function extractMermaidSourceFromElement(el: Element): string | null {
+  // 1. 从 data 属性提取（最可靠，保留原始格式）
+  const dataSource = el.getAttribute('data-mermaid-source') 
+    || el.getAttribute('data-source')
+    || el.getAttribute('data-code')
+    || el.getAttribute('data-graph-code');
+  if (dataSource?.trim()) {
+    console.log('[mermaid] Found source via data attribute');
+    return dataSource.trim();
+  }
+  
+  // 2. 从隐藏的 pre/code 元素提取（保留换行）
+  const codeEl = el.querySelector('pre.mermaid-source, code.mermaid-source, [data-mermaid-code], pre[style*="display: none"], pre[style*="display:none"]');
+  if (codeEl?.textContent?.trim()) {
+    console.log('[mermaid] Found source via hidden code element');
+    return codeEl.textContent.trim();
+  }
+  
+  // 3. 从 script 标签提取（保留原始格式）
+  const scriptEl = el.querySelector('script[type="text/mermaid"], script[type="application/mermaid"]');
+  if (scriptEl?.textContent?.trim()) {
+    console.log('[mermaid] Found source via script tag');
+    return scriptEl.textContent.trim();
+  }
+  
+  // 4. 检查相邻的 pre/code 元素（某些平台将源码放在相邻元素中）
+  const prevSibling = el.previousElementSibling;
+  if (prevSibling?.tagName === 'PRE' || prevSibling?.tagName === 'CODE') {
+    const prevText = prevSibling.textContent?.trim();
+    if (prevText && isMermaidCode(prevText)) {
+      console.log('[mermaid] Found source via previous sibling');
+      return prevText;
+    }
+  }
+  
+  // 5. 检查元素本身是否包含未渲染的源码（无 SVG 子元素）
+  const svg = el.querySelector('svg');
+  if (!svg && el.textContent?.trim()) {
+    const text = el.textContent.trim();
+    if (isMermaidCode(text)) {
+      console.log('[mermaid] Found source via textContent (no SVG)');
+      return text;
+    }
+  }
+  
+  // 6. 尝试从 innerHTML 提取（某些平台使用 HTML 注释存储源码）
+  const htmlComment = el.innerHTML.match(/<!--\s*((?:flowchart|graph|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|journey|gitGraph|mindmap|timeline)[\s\S]*?)-->/i);
+  if (htmlComment?.[1]?.trim()) {
+    console.log('[mermaid] Found source via HTML comment');
+    return htmlComment[1].trim();
+  }
+  
+  // 7. 如果有 SVG，尝试从 SVG 重建
+  if (svg) {
+    const reconstructed = reconstructMermaidFromSvg(svg);
+    if (reconstructed) {
+      console.log('[mermaid] Reconstructed from SVG in element');
+      return reconstructed;
+    }
+  }
+  
+  console.log('[mermaid] No source found for element');
+  return null;
+}
+
+/**
+ * 从 SVG 提取 Mermaid 源码
+ * 注意：从渲染后的 SVG 很难恢复原始源码，优先使用其他方法
+ */
+function extractMermaidSourceFromSvg(svg: Element): string | null {
+  // 1. 检查 SVG 的 data 属性（最可靠）
+  const svgSource = svg.getAttribute('data-mermaid-source') 
+    || svg.getAttribute('data-source')
+    || svg.getAttribute('data-graph-code');
+  if (svgSource?.trim()) {
+    console.log('[mermaid] Found SVG source via data attribute');
+    return svgSource.trim();
+  }
+  
+  // 2. 检查父元素的 data 属性
+  const parent = svg.parentElement;
+  if (parent) {
+    const parentSource = parent.getAttribute('data-mermaid-source') 
+      || parent.getAttribute('data-source')
+      || parent.getAttribute('data-graph-code');
+    if (parentSource?.trim()) {
+      console.log('[mermaid] Found SVG source via parent data attribute');
+      return parentSource.trim();
+    }
+    
+    // 检查父元素的相邻元素
+    const parentPrev = parent.previousElementSibling;
+    if (parentPrev?.tagName === 'PRE' || parentPrev?.tagName === 'CODE') {
+      const prevText = parentPrev.textContent?.trim();
+      if (prevText && isMermaidCode(prevText)) {
+        console.log('[mermaid] Found SVG source via parent previous sibling');
+        return prevText;
+      }
+    }
+  }
+  
+  // 3. 检查 SVG 内的 foreignObject 或 text 元素（某些渲染器保留源码）
+  const foreignObject = svg.querySelector('foreignObject');
+  if (foreignObject?.textContent?.trim()) {
+    const text = foreignObject.textContent.trim();
+    if (isMermaidCode(text)) {
+      console.log('[mermaid] Found SVG source via foreignObject');
+      return text;
+    }
+  }
+  
+  // 4. 尝试从 SVG 结构重建流程图代码
+  const reconstructed = reconstructMermaidFromSvg(svg);
+  if (reconstructed) {
+    console.log('[mermaid] Reconstructed mermaid code from SVG');
+    return reconstructed;
+  }
+  
+  // 5. 无法获取源码时，返回 null（不生成错误的占位符）
+  console.log('[mermaid] Cannot extract source from SVG, skipping');
+  return null;
+}
+
+/**
+ * 尝试从 SVG 结构重建 Mermaid 代码
+ * 这是一个有限的重建，主要针对流程图
+ */
+function reconstructMermaidFromSvg(svg: Element): string | null {
+  try {
+    // 检测图类型
+    const svgClass = svg.getAttribute('class') || '';
+    const svgId = svg.getAttribute('id') || '';
+    
+    // 提取所有节点文本
+    const nodeTexts: string[] = [];
+    
+    // 查找流程图节点（通常在 .node 或 .nodeLabel 中）
+    svg.querySelectorAll('.node, .nodeLabel, .label, g[class*="node"]').forEach((node) => {
+      // 获取节点中的文本
+      const textEl = node.querySelector('text, span, div, foreignObject');
+      const text = textEl?.textContent?.trim() || node.textContent?.trim();
+      if (text && !nodeTexts.includes(text)) {
+        nodeTexts.push(text);
+      }
+    });
+    
+    // 如果没有找到节点，尝试从所有 text 元素提取
+    if (nodeTexts.length === 0) {
+      svg.querySelectorAll('text').forEach((textEl) => {
+        const text = textEl.textContent?.trim();
+        if (text && text.length > 0 && !nodeTexts.includes(text)) {
+          nodeTexts.push(text);
+        }
+      });
+    }
+    
+    // 如果找到了节点文本，尝试重建
+    if (nodeTexts.length >= 2) {
+      // 检测方向
+      let direction = 'TD'; // 默认从上到下
+      if (svgClass.includes('LR') || svgId.includes('LR')) {
+        direction = 'LR';
+      } else if (svgClass.includes('RL') || svgId.includes('RL')) {
+        direction = 'RL';
+      } else if (svgClass.includes('BT') || svgId.includes('BT')) {
+        direction = 'BT';
+      }
+      
+      // 生成流程图代码
+      const lines: string[] = [`flowchart ${direction}`];
+      
+      // 为每个节点生成 ID 和标签
+      const nodeIds: string[] = [];
+      nodeTexts.forEach((text, index) => {
+        const nodeId = `node${index}`;
+        nodeIds.push(nodeId);
+        lines.push(`    ${nodeId}[${text}]`);
+      });
+      
+      // 生成连接（假设是线性流程）
+      for (let i = 0; i < nodeIds.length - 1; i++) {
+        lines.push(`    ${nodeIds[i]} --> ${nodeIds[i + 1]}`);
+      }
+      
+      const result = lines.join('\n');
+      console.log('[mermaid] Reconstructed flowchart:', result.substring(0, 100));
+      return result;
+    }
+    
+    return null;
+  } catch (e) {
+    console.error('[mermaid] Error reconstructing from SVG:', e);
+    return null;
+  }
+}
+
+/**
+ * 检测 Mermaid 图类型
+ */
+function detectMermaidType(code: string): string | undefined {
+  const trimmed = code.trim().toLowerCase();
+  
+  const types: Record<string, RegExp> = {
+    'flowchart': /^(flowchart|graph)\s+(tb|bt|lr|rl|td)/i,
+    'sequenceDiagram': /^sequencediagram/i,
+    'classDiagram': /^classdiagram/i,
+    'stateDiagram': /^statediagram/i,
+    'erDiagram': /^erdiagram/i,
+    'gantt': /^gantt/i,
+    'pie': /^pie/i,
+    'journey': /^journey/i,
+    'gitGraph': /^gitgraph/i,
+    'mindmap': /^mindmap/i,
+    'timeline': /^timeline/i,
+  };
+  
+  for (const [type, pattern] of Object.entries(types)) {
+    if (pattern.test(trimmed)) {
+      return type;
+    }
+  }
+  
+  return undefined;
+}
+
+/**
+ * 检查文本是否是 Mermaid 代码
+ */
+function isMermaidCode(text: string): boolean {
+  const trimmed = text.trim().toLowerCase();
+  
+  const keywords = [
+    'flowchart', 'graph', 'sequencediagram', 'classdiagram',
+    'statediagram', 'erdiagram', 'gantt', 'pie', 'journey',
+    'gitgraph', 'mindmap', 'timeline', 'quadrantchart', 'sankey'
+  ];
+  
+  for (const keyword of keywords) {
+    if (trimmed.startsWith(keyword)) {
+      return true;
+    }
+  }
+  
+  // 检查流程图语法特征
+  if (/-->/g.test(text) && /\[.*\]/g.test(text)) {
+    return true;
+  }
+  
+  return false;
+}
+
+// ========== Mermaid 提取器 ==========
+
+/**
+ * 提取 DOM 中的所有 Mermaid 图
+ */
+export function extractMermaidBlocks(container: HTMLElement): CollectedMermaid[] {
+  const mermaidBlocks: CollectedMermaid[] = [];
+  
+  try {
+    // 注意：不要在这里调用 normalizeMermaidInDom，因为调用者已经调用过了
+    
+    // 提取预处理后的 Mermaid 块
+    container.querySelectorAll('[data-sync-mermaid]').forEach((el) => {
+      const codeEl = el.querySelector('code');
+      const code = codeEl?.textContent || '';
+      const diagramType = el.getAttribute('data-diagram-type') || undefined;
+      
+      if (code) {
+        mermaidBlocks.push({
+          type: 'mermaid',
+          code,
+          diagramType,
+        });
+      }
+    });
+    
+    // 也检查 language-mermaid 代码块
+    container.querySelectorAll('pre code.language-mermaid').forEach((el) => {
+      if (el.closest('[data-sync-mermaid]')) return; // 已处理
+      
+      const code = el.textContent || '';
+      if (code) {
+        mermaidBlocks.push({
+          type: 'mermaid',
+          code,
+          diagramType: detectMermaidType(code),
+        });
+      }
+    });
+  } catch (e) {
+    console.error('[mermaid] Error extracting mermaid blocks:', e);
+  }
+  
+  console.log('[mermaid] Extracted mermaid blocks:', mermaidBlocks.length);
+  return mermaidBlocks;
+}
+
+// ========== 任务列表预处理 ==========
+
+/**
+ * 预处理 DOM 中的任务列表
+ * 将各种平台的任务列表格式统一为标准格式
+ */
+export function normalizeTaskListInDom(root: HTMLElement): void {
+  console.log('[tasklist] Starting normalizeTaskListInDom');
+  
+  // 1. 处理标准的 checkbox input
+  root.querySelectorAll('li input[type="checkbox"]').forEach((checkbox) => {
+    const li = checkbox.closest('li');
+    if (!li) return;
+    
+    const input = checkbox as HTMLInputElement;
+    const isChecked = input.checked || input.hasAttribute('checked');
+    
+    // 标记 li 为任务列表项
+    li.classList.add('task-list-item');
+    li.setAttribute('data-task', 'true');
+    li.setAttribute('data-checked', String(isChecked));
+    
+    console.log('[tasklist] Found checkbox task item, checked:', isChecked);
+  });
+  
+  // 2. 处理 GitHub 风格的任务列表（class="task-list-item"）
+  root.querySelectorAll('li.task-list-item').forEach((li) => {
+    if (li.hasAttribute('data-task')) return; // 已处理
+    
+    const checkbox = li.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+    const isChecked = checkbox?.checked || 
+                      checkbox?.hasAttribute('checked') ||
+                      li.classList.contains('checked') ||
+                      li.classList.contains('completed');
+    
+    li.setAttribute('data-task', 'true');
+    li.setAttribute('data-checked', String(isChecked));
+  });
+  
+  // 3. 处理某些平台使用的自定义任务列表格式
+  // 例如：<li data-task="done">...</li> 或 <li class="todo-item checked">...</li>
+  root.querySelectorAll('li[data-task], li.todo-item, li.todo, li.task').forEach((li) => {
+    if (li.hasAttribute('data-checked')) return; // 已处理
+    
+    const taskAttr = li.getAttribute('data-task') || '';
+    const isChecked = taskAttr === 'done' || 
+                      taskAttr === 'completed' ||
+                      taskAttr === 'checked' ||
+                      li.classList.contains('checked') ||
+                      li.classList.contains('completed') ||
+                      li.classList.contains('done');
+    
+    li.classList.add('task-list-item');
+    li.setAttribute('data-task', 'true');
+    li.setAttribute('data-checked', String(isChecked));
+    
+    console.log('[tasklist] Found custom task item, checked:', isChecked);
+  });
+  
+  // 4. 处理文本形式的任务标记（如 "[ ]" 或 "[x]" 开头的列表项）
+  root.querySelectorAll('li').forEach((li) => {
+    if (li.hasAttribute('data-task')) return; // 已处理
+    
+    const text = li.textContent?.trim() || '';
+    const taskMatch = text.match(/^\s*\[([x ])\]\s*/i);
+    
+    if (taskMatch) {
+      const isChecked = taskMatch[1].toLowerCase() === 'x';
+      li.classList.add('task-list-item');
+      li.setAttribute('data-task', 'true');
+      li.setAttribute('data-checked', String(isChecked));
+      
+      console.log('[tasklist] Found text-based task item, checked:', isChecked);
+    }
+  });
+  
+  console.log('[tasklist] normalizeTaskListInDom completed');
+}
+
 // ========== 公式提取器 ==========
 export function extractFormulas(container: HTMLElement): CollectedFormula[] {
   const formulas: CollectedFormula[] = [];
@@ -647,10 +1126,22 @@ export function flattenCodeHighlights(container: HTMLElement): void {
 // ========== DOM 白名单清洗 ==========
 const WHITELIST_TAGS = new Set([
   'p', 'div', 'span', 'a', 'strong', 'em', 'b', 'i', 'u',
+  // 删除线标签
+  'del', 's', 'strike',
+  // 标题
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li',
+  // 表格
   'table', 'thead', 'tbody', 'tr', 'th', 'td', 'colgroup', 'col',
+  // 代码和引用
   'pre', 'code', 'blockquote', 'figure', 'figcaption',
+  // 媒体
   'img', 'picture', 'source', 'br', 'hr',
+  // 上下标
+  'sub', 'sup',
+  // SVG（用于 Mermaid 图）- 保留整个 SVG 元素，不处理内部
+  'svg',
+  // 任务列表相关
+  'input',
 ]);
 
 export function cleanDOMWithWhitelist(container: HTMLElement): void {
@@ -659,20 +1150,39 @@ export function cleanDOMWithWhitelist(container: HTMLElement): void {
       const el = node as HTMLElement;
       const tagName = el.tagName.toLowerCase();
       
+      // SVG 元素及其子元素不处理，保持原样
+      if (tagName === 'svg' || el.closest('svg')) {
+        return;
+      }
+      
       if (!WHITELIST_TAGS.has(tagName)) {
-        const children = Array.from(el.childNodes);
-        children.forEach(child => el.parentNode?.insertBefore(child, el));
-        el.remove();
-        children.forEach(walk);
+        const parent = el.parentNode;
+        if (parent) {
+          const children = Array.from(el.childNodes);
+          children.forEach(child => parent.insertBefore(child, el));
+          el.remove();
+          children.forEach(walk);
+        }
         return;
       }
       
       const keepClasses = Array.from(el.classList).filter(c =>
-        c.startsWith('katex') || c.startsWith('mjx') || c.includes('math') || c.startsWith('language-') || c.startsWith('hljs')
+        c.startsWith('katex') || c.startsWith('mjx') || c.includes('math') || 
+        c.startsWith('language-') || c.startsWith('hljs') ||
+        // Mermaid 相关类名
+        c === 'mermaid' || c.includes('mermaid') ||
+        // 任务列表相关类名
+        c === 'task-list-item' || c === 'task-list' || c.includes('checkbox') || c.includes('todo')
       );
       el.className = keepClasses.join(' ');
       
-      const keepAttrs = ['class', 'src', 'alt', 'title', 'href', 'id', 'data-sync-math', 'data-tex', 'data-display', 'data-lang'];
+      const keepAttrs = ['class', 'src', 'alt', 'title', 'href', 'id', 
+        'data-sync-math', 'data-tex', 'data-display', 'data-lang',
+        // Mermaid 相关属性
+        'data-mermaid', 'data-mermaid-source', 'data-source', 'data-sync-mermaid', 'data-diagram-type',
+        // 任务列表相关属性
+        'type', 'checked', 'disabled', 'data-task', 'data-checked'
+      ];
       Array.from(el.attributes).forEach(attr => {
         if (!keepAttrs.includes(attr.name)) el.removeAttribute(attr.name);
       });
@@ -755,12 +1265,13 @@ export function extractAndNormalizeImages(container: HTMLElement): CollectedImag
 export function checkQuality(
   initialMetrics: ContentMetrics,
   finalMetrics: ContentMetrics,
-  thresholds = { images: 0.3, formulas: 0.5, tables: 0.5 }
+  thresholds = { images: 0.3, formulas: 0.5, tables: 0.5, mermaid: 0.5 }
 ): QualityCheck {
   const lossRatio = {
     images: initialMetrics.images > 0 ? (initialMetrics.images - finalMetrics.images) / initialMetrics.images : 0,
     formulas: initialMetrics.formulas > 0 ? (initialMetrics.formulas - finalMetrics.formulas) / initialMetrics.formulas : 0,
     tables: initialMetrics.tables > 0 ? (initialMetrics.tables - finalMetrics.tables) / initialMetrics.tables : 0,
+    mermaid: initialMetrics.mermaidBlocks > 0 ? (initialMetrics.mermaidBlocks - finalMetrics.mermaidBlocks) / initialMetrics.mermaidBlocks : 0,
   };
   
   if (lossRatio.images > thresholds.images) {
@@ -771,6 +1282,9 @@ export function checkQuality(
   }
   if (lossRatio.tables > thresholds.tables) {
     return { pass: false, reason: '表格丢失' + (lossRatio.tables * 100).toFixed(1) + '%', initialMetrics, finalMetrics, lossRatio };
+  }
+  if (lossRatio.mermaid > thresholds.mermaid) {
+    return { pass: false, reason: 'Mermaid图丢失' + (lossRatio.mermaid * 100).toFixed(1) + '%', initialMetrics, finalMetrics, lossRatio };
   }
   return { pass: true, initialMetrics, finalMetrics, lossRatio };
 }
