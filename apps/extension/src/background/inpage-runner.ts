@@ -92,7 +92,9 @@ export async function executeInOrigin<T>(
     console.log('[inpage-runner] Tab loaded, waiting for page to stabilize...');
     
     // 额外等待，确保页面 JS 完全初始化
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // 简书 writer 页面注入脚本本身会等待编辑器就绪，这里缩短固定等待以提升首屏填充速度
+    const stabilizeMs = /https?:\/\/www\.jianshu\.com\/writer\b/i.test(url) ? 200 : 1500;
+    await new Promise(resolve => setTimeout(resolve, stabilizeMs));
     
     console.log('[inpage-runner] Executing script');
     

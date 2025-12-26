@@ -115,14 +115,14 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
    * Jianshu
    */
   jianshu: {
-    mode: 'binaryUpload',
+    // 简书的图片上传依赖站内编辑器环境（token/防盗链等），优先用“站内粘贴/拖拽上传”生成可识别 URL。
+    mode: 'domPasteUpload',
     constraints: WEBP_CONSTRAINTS,
-    uploadUrl: 'https://up.qbox.me/',
-    method: 'POST',
-    fileFieldName: 'file',
-    responseParser: (data) => ({
-      url: `https://upload-images.jianshu.io/${data.key}`,
-    }),
+    domPasteConfig: {
+      editorUrl: 'https://www.jianshu.com/writer',
+      editorSelector: '.CodeMirror textarea, .CodeMirror, .kalamu-area, [contenteditable="true"]',
+      timeoutMs: 40000,
+    },
   },
 
   /**

@@ -199,7 +199,7 @@ export async function publishToTarget(
     const needsDownloadedImagesForDomFill =
       adapter.kind === 'dom' &&
       strategy?.mode === 'domPasteUpload' &&
-      (target.platform === 'aliyun' || target.platform === 'juejin');
+      (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu');
 
     const prefillBeforeImageProcessing =
       adapter.kind === 'dom' && (target.platform === 'bilibili' || target.platform === 'csdn');
