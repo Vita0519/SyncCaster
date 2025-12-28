@@ -120,9 +120,8 @@ const PLATFORMS: Record<string, PlatformConfig> = {
   aliyun: {
     id: 'aliyun',
     name: '阿里云开发者社区',
-    // 直接使用开发者社区主页，页面会自动显示登录入口
-    // 原登录页面 /user/login 已失效
-    loginUrl: 'https://developer.aliyun.com/',
+    // 使用阿里云统一登录页面，登录后会自动跳转回开发者社区
+    loginUrl: 'https://account.aliyun.com/login/login.htm?oauth_callback=https%3A%2F%2Fdeveloper.aliyun.com%2F',
     homeUrl: 'https://developer.aliyun.com/',
     // 只匹配开发者社区域名，避免在 www.aliyun.com 上检测
     urlPattern: /developer\.aliyun\.com/,

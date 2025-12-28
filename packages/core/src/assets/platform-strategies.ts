@@ -155,16 +155,19 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
 
   /**
    * Tencent Cloud developer community
+   * 
+   * 腾讯云开发者社区的图片上传 API 需要登录状态和 CSRF token，
+   * 使用 domPasteUpload 模式可以利用用户在页面的登录状态，
+   * 通过模拟粘贴的方式上传图片，更加稳定可靠。
    */
   'tencent-cloud': {
-    mode: 'binaryUpload',
+    mode: 'domPasteUpload',
     constraints: WEBP_CONSTRAINTS,
-    uploadUrl: 'https://cloud.tencent.com/developer/api/image/upload',
-    method: 'POST',
-    fileFieldName: 'file',
-    responseParser: (data) => ({
-      url: data.data?.url || data.url,
-    }),
+    domPasteConfig: {
+      editorUrl: 'https://cloud.tencent.com/developer/article/write-new',
+      editorSelector: '.CodeMirror textarea, .CodeMirror, textarea, [contenteditable="true"]',
+      timeoutMs: 40000,
+    },
   },
 
   /**

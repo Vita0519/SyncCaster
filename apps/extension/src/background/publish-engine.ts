@@ -1,7 +1,7 @@
 ﻿import { db, type CanonicalPost, type PublishTarget, type LogEntry } from '@synccaster/core';
 import { ChromeStorageBridge } from '@synccaster/core';
 import { getAdapter } from '@synccaster/adapters';
-import { executeInOrigin, getReuseTabInfo } from './inpage-runner';
+import { executeInOrigin, getReuseTabInfo, openOrReuseTab } from './inpage-runner';
 import { ImageUploadPipeline, getImageStrategy, type ImageUploadProgress, renderMarkdownToHtmlForPaste } from '@synccaster/core';
 import type { AssetManifest } from '@synccaster/core';
 
@@ -184,6 +184,31 @@ export async function publishToTarget(
       }
     }
 
+    // DOM 平台：尽早打开编辑页（改善“点击发布后等待很久才跳转”的体验）。
+    // 这里只负责打开/复用标签页，不执行注入脚本；后续 executeInOrigin 会复用该 tab。
+    const domAutomation =
+      adapter.kind === 'dom' ? ((adapter as any).dom as { matchers: string[]; fillAndPublish: Function; getEditorUrl?: (accountId?: string) => string | Promise<string> } | undefined) : undefined;
+    const domReuseKey = `${jobId}:${target.platform}:${target.accountId}`;
+    let domTargetUrl: string | undefined;
+    if (domAutomation) {
+      try {
+        if (domAutomation.getEditorUrl) {
+          const urlResult = domAutomation.getEditorUrl(target.accountId);
+          domTargetUrl = urlResult instanceof Promise ? await urlResult : urlResult;
+        } else {
+          domTargetUrl = toDomOpenUrl(domAutomation.matchers?.[0] || '');
+        }
+
+        if (domTargetUrl) {
+          await openOrReuseTab(domTargetUrl, { active: activeTab, reuseKey: domReuseKey });
+          await jobLogger({ level: 'info', step: 'dom', message: '已打开发布页面', meta: { url: domTargetUrl } });
+        }
+      } catch (e: any) {
+        console.warn('[publish-engine] Failed to pre-open DOM editor tab', e);
+        await jobLogger({ level: 'warn', step: 'dom', message: '打开发布页面失败，将继续尝试发布', meta: { error: e?.message } });
+      }
+    }
+
     const manifest = buildAssetManifest(processedPost);
     let strategy = getImageStrategy(target.platform);
 
@@ -199,10 +224,10 @@ export async function publishToTarget(
     const needsDownloadedImagesForDomFill =
       adapter.kind === 'dom' &&
       strategy?.mode === 'domPasteUpload' &&
-      (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu');
+      (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu' || target.platform === 'tencent-cloud');
 
     const prefillBeforeImageProcessing =
-      adapter.kind === 'dom' && (target.platform === 'bilibili' || target.platform === 'csdn');
+      adapter.kind === 'dom' && (target.platform === 'bilibili' || target.platform === 'csdn' || target.platform === 'oschina');
 
     if (!prefillBeforeImageProcessing && manifest.images.length > 0 && strategy && strategy.mode !== 'externalUrlOnly') {
       await jobLogger({
@@ -325,11 +350,20 @@ export async function publishToTarget(
     if (adapter.kind === 'dom') {
       // DOM 自动化模式：直接走站内执行
       if ((adapter as any).dom) {
-        const dom = (adapter as any).dom as { matchers: string[]; fillAndPublish: Function; getEditorUrl?: Function };
+        const dom = (adapter as any).dom as { matchers: string[]; fillAndPublish: Function; getEditorUrl?: (accountId?: string) => string | Promise<string> };
         const reuseKey = `${jobId}:${target.platform}:${target.accountId}`;
         
-        // 获取目标 URL
-        const targetUrl = toDomOpenUrl(dom.matchers?.[0] || '');
+        // 获取目标 URL - 优先使用 getEditorUrl 动态生成（支持需要用户ID的平台）
+        let targetUrl: string;
+        if (domTargetUrl) {
+          targetUrl = domTargetUrl;
+        } else if (dom.getEditorUrl) {
+          const urlResult = dom.getEditorUrl(target.accountId);
+          targetUrl = urlResult instanceof Promise ? await urlResult : urlResult;
+          console.log('[publish-engine] Using dynamic editor URL', { targetUrl, accountId: target.accountId });
+        } else {
+          targetUrl = toDomOpenUrl(dom.matchers?.[0] || '');
+        }
         
         if (!targetUrl) {
           throw new Error('DOM adapter missing target URL');
@@ -445,6 +479,153 @@ export async function publishToTarget(
                };
 
                await executeInOrigin(targetUrl, applyMappingInEditor as any, [entries], {
+                 closeTab: false,
+                 active: false,
+                 reuseKey,
+               });
+
+               await jobLogger({
+                 level: 'info',
+                 step: 'upload_images',
+                 message: `图片处理完成: ${imageResult.stats.success}/${imageResult.stats.total} 成功`,
+                 meta: imageResult.stats,
+               });
+             } else {
+               await jobLogger({ level: 'warn', step: 'upload_images', message: '图片上传失败，将使用原始链接' });
+             }
+           } catch (imgError: any) {
+             console.error('[publish-engine] 图片处理失败', imgError);
+             await jobLogger({
+               level: 'warn',
+               step: 'upload_images',
+               message: '图片处理失败，将使用原始链接',
+               meta: { error: imgError?.message },
+             });
+           }
+         }
+
+         // OSChina：外链图片在预览/发布中经常不可用，优先让标题/正文快速填入，再在同一编辑页中上传并回写链接。
+         if (
+           prefillBeforeImageProcessing &&
+           target.platform === 'oschina' &&
+           manifest.images.length > 0 &&
+           strategy &&
+           strategy.mode !== 'externalUrlOnly'
+         ) {
+           await jobLogger({ level: 'info', step: 'upload_images', message: `发现 ${manifest.images.length} 张图片需要处理` });
+           try {
+             const tabInfo = await getReuseTabInfo(reuseKey);
+             const inTabUrl = tabInfo?.url || targetUrl;
+
+             const imageResult = await uploadImagesInPlatform(
+               manifest.images.map((img) => img.originalUrl),
+               target.platform,
+               strategy,
+               (progress) => {
+                 jobLogger({
+                   level: 'info',
+                   step: 'upload_images',
+                   message: `图片上传: ${progress.completed}/${progress.total}`,
+                   meta: { progress },
+                 });
+               },
+               { targetUrl: inTabUrl, reuseKey, closeTab: false, active: false }
+             );
+
+             if (imageResult.urlMapping.size > 0) {
+               const entries = Array.from(imageResult.urlMapping.entries());
+
+               const applyMappingInMarkdownEditor = async (pairs: [string, string][]) => {
+                 const replaceByPairs = (text: string) => {
+                   let out = text || '';
+                   const sorted = pairs.slice().sort((a, b) => b[0].length - a[0].length);
+                   for (const [from, to] of sorted) {
+                     if (!from || !to || from === to) continue;
+                     out = out.split(from).join(to);
+                   }
+                   return out;
+                 };
+
+                 const getAllDocs = (): Document[] => {
+                   const docs: Document[] = [document];
+                   const iframes = Array.from(document.querySelectorAll('iframe')) as HTMLIFrameElement[];
+                   for (const iframe of iframes) {
+                     try {
+                       const doc = iframe.contentDocument;
+                       if (doc) docs.push(doc);
+                     } catch {}
+                   }
+                   return docs;
+                 };
+
+                 const findCodeMirror = () => {
+                   for (const doc of getAllDocs()) {
+                     const els = Array.from(doc.querySelectorAll('.CodeMirror')) as any[];
+                     for (const el of els) {
+                       const cm = el?.CodeMirror;
+                       if (cm?.getValue && cm?.setValue) return { cm, el: el as HTMLElement };
+                     }
+                   }
+                   return null;
+                 };
+
+                 const findTextarea = () => {
+                   for (const doc of getAllDocs()) {
+                     const tas = Array.from(doc.querySelectorAll('textarea')) as HTMLTextAreaElement[];
+                     const candidates = tas.filter((ta) => {
+                       const attrs = [
+                         ta.getAttribute('placeholder') || '',
+                         ta.getAttribute('aria-label') || '',
+                         ta.getAttribute('name') || '',
+                         ta.id || '',
+                         ta.className || '',
+                       ]
+                         .join(' ')
+                         .toLowerCase();
+                       return !/title|标题/i.test(attrs);
+                     });
+                     if (candidates.length > 0) return candidates[0];
+                   }
+                   return null;
+                 };
+
+                 const cmFound = findCodeMirror();
+                 if (cmFound) {
+                   const cm = cmFound.cm;
+                   const current = String(cm.getValue?.() ?? '');
+                   const next = replaceByPairs(current);
+                   if (next !== current) {
+                     const doc = cm.getDoc?.() || null;
+                     const cursor = doc?.getCursor?.() || null;
+                     cm.setValue(next);
+                     try { cm.refresh?.(); } catch {}
+                     try {
+                       if (cursor && doc?.setCursor) doc.setCursor(cursor);
+                     } catch {}
+                   }
+                   try {
+                     const ta = (cmFound.el as any).querySelector?.('textarea') as HTMLTextAreaElement | null;
+                     ta?.dispatchEvent(new Event('input', { bubbles: true }));
+                   } catch {}
+                   return { ok: true, method: 'codemirror' };
+                 }
+
+                 const ta = findTextarea();
+                 if (ta) {
+                   const current = String(ta.value || '');
+                   const next = replaceByPairs(current);
+                   if (next !== current) {
+                     ta.value = next;
+                     ta.dispatchEvent(new Event('input', { bubbles: true }));
+                     ta.dispatchEvent(new Event('change', { bubbles: true }));
+                   }
+                   return { ok: true, method: 'textarea' };
+                 }
+
+                 return { ok: false, reason: 'editor_not_found' };
+               };
+
+               await executeInOrigin(inTabUrl, applyMappingInMarkdownEditor as any, [entries], {
                  closeTab: false,
                  active: false,
                  reuseKey,
@@ -651,7 +832,8 @@ const PLATFORM_URLS: Record<string, string> = {
   segmentfault: 'https://segmentfault.com/',
   // 避免先打开首页再跳转编辑页（用户可见跳转/延迟）；图片上传与发文都可在专栏编辑页完成
   bilibili: 'https://member.bilibili.com/platform/upload/text/edit',
-  oschina: 'https://www.oschina.net/',
+  // 开源中国发文页面
+  oschina: 'https://my.oschina.net/blog/write',
 };
 
 function toDomOpenUrl(matcherOrUrl: string) {
@@ -673,15 +855,17 @@ async function uploadImagesInPlatform(
   imageUrls: string[],
   platformId: string,
   strategy: any,
-  onProgress?: (progress: { completed: number; total: number }) => void
+  onProgress?: (progress: { completed: number; total: number }) => void,
+  opts: { targetUrl?: string; reuseKey?: string; closeTab?: boolean; active?: boolean } = {}
 ): Promise<{
   urlMapping: Map<string, string>;
   stats: { total: number; success: number; failed: number };
 }> {
   const targetUrl =
-    strategy?.mode === 'domPasteUpload' && strategy.domPasteConfig?.editorUrl
+    opts.targetUrl ||
+    (strategy?.mode === 'domPasteUpload' && strategy.domPasteConfig?.editorUrl
       ? strategy.domPasteConfig.editorUrl
-      : PLATFORM_URLS[platformId];
+      : PLATFORM_URLS[platformId]);
 
   if (!targetUrl) {
     console.log(`[publish-engine] 未知平台 ${platformId}，跳过图片上传`);
@@ -911,6 +1095,15 @@ async function uploadImagesInPlatform(
           }
           if (!newUrl) newUrl = findUrlInObject(data);
           if (!newUrl) throw new Error('无法解析图片 URL');
+
+          // 规范化 URL（兼容 `//host/path` 与 `/path`）
+          try {
+            if (newUrl.startsWith('//')) newUrl = 'https:' + newUrl;
+            else if (newUrl.startsWith('/')) {
+              const origin = new URL(String(strategy.uploadUrl)).origin;
+              newUrl = origin + newUrl;
+            }
+          } catch {}
 
           urlMapping.set(img.url, newUrl);
           success++;
@@ -1379,6 +1572,10 @@ async function uploadImagesInPlatform(
           throw new Error('无法从响应中解析图片 URL: ' + JSON.stringify(data).substring(0, 200));
         }
 
+        // 规范化 URL（兼容 `//host/path` 与 `/path`）
+        if (newUrl.startsWith('//')) newUrl = 'https:' + newUrl;
+        else if (newUrl.startsWith('/')) newUrl = location.origin + newUrl;
+
         results.push({ originalUrl: img.url, newUrl, success: true });
       } catch (error: any) {
         console.error('[image-upload] 上传失败:', img.url, error);
@@ -1397,7 +1594,7 @@ async function uploadImagesInPlatform(
       targetUrl,
       uploadFunction,
       [downloadedImages, serializableStrategy],
-      { closeTab: true, active: false }
+      { closeTab: opts.closeTab ?? true, active: opts.active ?? false, reuseKey: opts.reuseKey }
     );
 
     const urlMapping = new Map<string, string>();
@@ -1499,7 +1696,22 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
     const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     let match;
     while ((match = mdImageRegex.exec(post.body_md)) !== null) {
-      const url = (match[2] || '').trim();
+      // 兼容 Markdown 标准语法：`![](<url> "title")` / `![](url "title")`
+      let inner = String(match[2] || '').trim();
+
+      // 分离可选 title（通常以引号开始），避免把 title 里的空格也当作 URL 的一部分
+      const quoteIdx = inner.search(/["']/);
+      if (quoteIdx > 0) {
+        inner = inner.slice(0, quoteIdx).trimEnd();
+      }
+
+      // 支持 ![](<url>) 写法：去掉包裹的尖括号
+      if (inner.startsWith('<') && inner.endsWith('>')) {
+        inner = inner.slice(1, -1);
+      }
+
+      // 去除 URL 中可能混入的空格/换行（如 `. jpeg`）
+      const url = inner.replace(/\s+/g, '');
       if (url && !seen.has(url) && isExternalImage(url)) {
         seen.add(url);
         images.push({

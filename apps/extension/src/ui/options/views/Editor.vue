@@ -358,11 +358,44 @@ watch(previewHtml, async () => {
 function showCopySuccess(msg: string = '已复制到剪贴板') {
   copyTipMessage.value = msg;
   showCopyTip.value = true;
-  setTimeout(() => { showCopyTip.value = false; }, 2000);
+  setTimeout(() => { showCopyTip.value = false; }, 1000);
+}
+
+function copyWithExecCommand(text: string): boolean {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', 'true');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '-9999px';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+async function copyPlainText(text: string): Promise<boolean> {
+  const v = String(text ?? '');
+  if (!v) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(v);
+      return true;
+    }
+  } catch {}
+  return copyWithExecCommand(v);
 }
 
 async function copyText(text: string, label: string = '内容') {
-  try { await navigator.clipboard.writeText(text); showCopySuccess(`已复制${label}`); } catch {}
+  const ok = await copyPlainText(text);
+  if (ok) showCopySuccess(`已复制${label}`);
+  else showValidationError('复制失败：请检查浏览器剪贴板权限');
 }
 
 function stripHtmlToText(html: string): string {
@@ -376,13 +409,20 @@ async function copyPreview() {
   const bodyHtml = container?.innerHTML ?? (previewHtml.value || '');
   const plain = stripHtmlToText(bodyHtml);
   try {
-    await navigator.clipboard.write([new ClipboardItem({
-      'text/html': new Blob([bodyHtml], { type: 'text/html' }),
-      'text/plain': new Blob([plain], { type: 'text/plain' }),
-    })]);
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
+      throw new Error('clipboard_write_unavailable');
+    }
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/html': new Blob([bodyHtml], { type: 'text/html' }),
+        'text/plain': new Blob([plain], { type: 'text/plain' }),
+      }),
+    ]);
     showCopySuccess('已复制预览内容');
   } catch {
-    try { await navigator.clipboard.writeText(plain); showCopySuccess('已复制预览内容'); } catch {}
+    const ok = await copyPlainText(plain);
+    if (ok) showCopySuccess('已复制预览内容');
+    else showValidationError('复制失败：请检查浏览器剪贴板权限');
   }
 }
 
@@ -428,7 +468,7 @@ const validationTipMessage = ref('');
 function showValidationError(msg: string) {
   validationTipMessage.value = msg;
   showValidationTip.value = true;
-  setTimeout(() => { showValidationTip.value = false; }, 2000);
+  setTimeout(() => { showValidationTip.value = false; }, 1500);
 }
 
 async function save() {
@@ -684,9 +724,15 @@ onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisib
 .image-preview-modal img { max-width: 90vw; max-height: 85vh; border-radius: 8px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); }
 .image-caption { text-align: center; color: white; margin-top: 12px; font-size: 14px; }
 
-.toast { position: fixed; bottom: 20px; right: 20px; padding: 10px 16px; border-radius: 8px; font-size: 13px; z-index: 10000; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15); }
+.toast { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); padding: 6px 10px; border-radius: 999px; font-size: 12px; z-index: 10000; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18); pointer-events: none; animation: toastFade 1s ease-out forwards; }
 .toast-success { background: #10b981; color: white; }
-.toast-warning { background: #f59e0b; color: white; }
+.toast-warning { top: 44px; background: #f59e0b; color: white; }
+
+@keyframes toastFade {
+  0% { opacity: 0; transform: translate(-50%, -6px); }
+  10% { opacity: 0.98; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -8px); }
+}
 
 .publish-dialog { background: white; border-radius: 16px; width: 100%; max-width: 500px; max-height: 80vh; overflow: hidden; display: flex; flex-direction: column; }
 .dialog-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #e5e7eb; }

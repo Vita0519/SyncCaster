@@ -39,6 +39,63 @@ export async function getReuseTabInfo(reuseKey: string): Promise<{ tabId: number
   }
 }
 
+/**
+ * Open a tab (or reuse an existing one) for a given reuseKey without waiting for page load.
+ *
+ * This is useful for DOM automation platforms where we want to show the editor page ASAP,
+ * while heavy preprocessing (e.g. image downloading) continues in background.
+ */
+export async function openOrReuseTab(
+  url: string,
+  opts: { active?: boolean; reuseKey?: string } = {}
+): Promise<{ tabId: number; url: string; reused: boolean }> {
+  const reuseKey = opts.reuseKey;
+  console.log('[inpage-runner] openOrReuseTab', { url, active: opts.active, reuseKey });
+
+  let tab: chrome.tabs.Tab | undefined;
+  try {
+    if (reuseKey) {
+      const record = reuseTabs.get(reuseKey);
+      if (record?.tabId) {
+        try {
+          tab = await chrome.tabs.get(record.tabId);
+        } catch {
+          reuseTabs.delete(reuseKey);
+        }
+      }
+    }
+
+    if (!tab) {
+      tab = await chrome.tabs.create({ url, active: !!opts.active });
+      if (!tab?.id) throw new Error('Failed to create tab');
+      if (reuseKey) {
+        reuseTabs.set(reuseKey, { tabId: tab.id, createdAt: Date.now(), lastUrl: url });
+      }
+      return { tabId: tab.id, url, reused: false };
+    }
+
+    if (!tab.id) throw new Error('Tab id missing');
+    const currentUrl = tab.url || '';
+
+    if (currentUrl !== url) {
+      await chrome.tabs.update(tab.id, { url });
+      if (reuseKey) {
+        const record = reuseTabs.get(reuseKey);
+        if (record) record.lastUrl = url;
+      }
+    }
+
+    if (opts.active) {
+      await chrome.tabs.update(tab.id, { active: true });
+    }
+
+    return { tabId: tab.id, url, reused: true };
+  } catch (error) {
+    console.error('[inpage-runner] openOrReuseTab failed', error);
+    throw error;
+  }
+}
+
 export async function executeInOrigin<T>(
   url: string,
   fn: (...args: any[]) => Promise<T> | T,
