@@ -393,7 +393,7 @@ export class AccountService {
     if (account.platform === 'segmentfault') {
       // 思否用户主页格式：https://segmentfault.com/u/{slug}
       const slug = String((account.meta as any)?.profileId || extractUserIdFromAccountId(account) || '').trim();
-      if (slug && slug.length > 0 && !slug.startsWith('segmentfault_')) {
+      if (slug && /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(slug) && !slug.startsWith('segmentfault_') && !/^\d+$/.test(slug)) {
         return `https://segmentfault.com/u/${slug}`;
       }
       return config.homeUrl;

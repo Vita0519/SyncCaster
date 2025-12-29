@@ -1161,7 +1161,9 @@ const segmentfaultDetector: PlatformAuthDetector = {
     const isSegmentfaultSlugLike = (value: string): boolean => {
       const v = value.trim();
       if (!v || v.length > 50) return false;
-      return /^[a-zA-Z0-9_-]{2,50}$/.test(v);
+      if (/[^\x00-\x7F]/.test(v)) return false;
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(v)) return false;
+      return !/^\d+$/.test(v);
     };
 
     const slugFromUrl = (() => {
@@ -1188,36 +1190,9 @@ const segmentfaultDetector: PlatformAuthDetector = {
         }
 
         const currentSlugLike = isSegmentfaultSlugLike(nickname);
-        const nextSlugLike = isSegmentfaultSlugLike(text);
-        if (currentSlugLike && !nextSlugLike) nickname = text;
+      const nextSlugLike = isSegmentfaultSlugLike(text);
+      if (currentSlugLike && !nextSlugLike) nickname = text;
       };
-
-      if (window.location.pathname.startsWith('/u/')) {
-        const profileNameSelectors = [
-          // 思否个人主页用户名在 h3.text-center 中
-          '.userinfo h3.text-center',
-          'h3.text-center.pt-3',
-          '.card-body h3.text-center',
-          '[class*="profile"] [class*="name"]',
-          '[class*="user"] [class*="name"]',
-          '.user__name',
-          '.user-name',
-          '.profile__name',
-          '.profile-name',
-          'main h1',
-          'main h2',
-          'main h3',
-        ];
-
-        for (const selector of profileNameSelectors) {
-          const el = document.querySelector(selector) as HTMLElement | null;
-          if (!el) continue;
-          const rect = el.getBoundingClientRect?.();
-          if (rect && rect.top > 600) continue;
-          considerNickname(el.textContent || undefined);
-          if (nickname && (!slugFromUrl || nickname !== slugFromUrl)) break;
-        }
-      }
       
       // 1. 尝试从导航栏用户头像区域提取
       const navUserSelectors = [
@@ -1248,40 +1223,12 @@ const segmentfaultDetector: PlatformAuthDetector = {
           const userLink = navUser.querySelector('a[href^="/u/"]') as HTMLAnchorElement;
           if (userLink) {
             const match = userLink.href.match(/\/u\/([^\/\?]+)/);
-            if (match?.[1]) {
-              userId = match[1];
+            if (match?.[1] && isSegmentfaultSlugLike(match[1])) {
+              userId = match[1].trim();
             }
           }
           
           if (avatar || nickname) break;
-        }
-      }
-      
-      // 2. 尝试从页面中的用户链接提取
-      if (!userId) {
-        const userLinks = document.querySelectorAll('a[href^="/u/"]');
-        for (const link of userLinks) {
-          const href = (link as HTMLAnchorElement).href;
-          const match = href.match(/\/u\/([^\/\?]+)/);
-          if (match?.[1]) {
-            userId = match[1];
-            if (!nickname) {
-              considerNickname(link.textContent || undefined);
-            }
-            break;
-          }
-        }
-      }
-      
-      // 3. 尝试从头像图片提取
-      if (!avatar) {
-        const avatarImgs = document.querySelectorAll('img[class*="avatar"], img[src*="avatar"]');
-        for (const img of avatarImgs) {
-          const src = (img as HTMLImageElement).src;
-          if (src && !src.includes('default') && !src.includes('placeholder') && src.includes('http')) {
-            avatar = src;
-            break;
-          }
         }
       }
       
@@ -1326,8 +1273,14 @@ const segmentfaultDetector: PlatformAuthDetector = {
               (!isSegmentfaultSlugLike(nameField) ? nameField : '') ||
               '';
             log('segmentfault', '从全局变量获取到用户信息', { nickname: displayName, slug: user.name });
+            const userId =
+              (typeof user.slug === 'string' && isSegmentfaultSlugLike(user.slug) && user.slug.trim()) ||
+              (typeof user.username === 'string' && isSegmentfaultSlugLike(user.username) && user.username.trim()) ||
+              (typeof user.user_name === 'string' && isSegmentfaultSlugLike(user.user_name) && user.user_name.trim()) ||
+              (typeof user.name === 'string' && isSegmentfaultSlugLike(user.name) && user.name.trim()) ||
+              undefined;
             return {
-              userId: String(user.slug || user.name || user.username || user.id || user.uid || ''),
+              userId,
               nickname: displayName,
               avatar: user.avatar || user.avatarUrl || user.avatar_url,
             };
@@ -1390,7 +1343,12 @@ const segmentfaultDetector: PlatformAuthDetector = {
               return {
                 loggedIn: true,
                 platform: 'segmentfault',
-                userId: String(user.slug || user.name || user.username || user.id || user.uid || ''),
+                userId:
+                  (typeof user.slug === 'string' && isSegmentfaultSlugLike(user.slug) && user.slug.trim()) ||
+                  (typeof user.username === 'string' && isSegmentfaultSlugLike(user.username) && user.username.trim()) ||
+                  (typeof user.user_name === 'string' && isSegmentfaultSlugLike(user.user_name) && user.user_name.trim()) ||
+                  (typeof user.name === 'string' && isSegmentfaultSlugLike(user.name) && user.name.trim()) ||
+                  undefined,
                 nickname: displayName || '思否用户',
                 avatar: user.avatar || user.avatarUrl || user.avatar_url,
                 meta: {
@@ -1559,6 +1517,21 @@ const oschinaDetector: PlatformAuthDetector = {
   async checkLogin(): Promise<LoginState> {
     log('oschina', '检测登录状态...');
     const url = window.location.href;
+
+    const normalizeUrl = (url?: unknown, base = 'https://www.oschina.net'): string | undefined => {
+      const candidate =
+        typeof url === 'string'
+          ? url
+          : url && typeof url === 'object'
+            ? (url as any).url || (url as any).src || (url as any).href
+            : undefined;
+      if (typeof candidate !== 'string') return undefined;
+      const trimmed = candidate.trim();
+      if (!trimmed || trimmed === '[object Object]') return undefined;
+      if (trimmed.startsWith('//')) return `https:${trimmed}`;
+      if (trimmed.startsWith('/')) return `${base}${trimmed}`;
+      return trimmed;
+    };
     
     // 辅助函数：从 DOM 中提取用户信息
     const extractUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
@@ -1665,8 +1638,8 @@ const oschinaDetector: PlatformAuthDetector = {
         loggedIn: true,
         platform: 'oschina',
         userId: String(win.G_USER.id),
-        nickname: win.G_USER.name || win.G_USER.account || '开源中国用户',
-        avatar: win.G_USER.portrait || win.G_USER.avatar,
+        nickname: win.G_USER.account || win.G_USER.name || '开源中国用户',
+        avatar: normalizeUrl(win.G_USER.portrait || win.G_USER.avatar),
       };
     }
     
@@ -1685,8 +1658,8 @@ const oschinaDetector: PlatformAuthDetector = {
           loggedIn: true,
           platform: 'oschina',
           userId: String(userData.id || userData.uid),
-          nickname: userData.name || userData.nickname || userData.account || '开源中国用户',
-          avatar: userData.portrait || userData.avatar,
+          nickname: userData.account || userData.nickname || userData.name || '开源中国用户',
+          avatar: normalizeUrl(userData.portrait || userData.avatar),
         };
       }
     }
@@ -1717,8 +1690,8 @@ const oschinaDetector: PlatformAuthDetector = {
                 loggedIn: true,
                 platform: 'oschina',
                 userId: String(user.id),
-                nickname: user.name || user.nickname || user.account || '开源中国用户',
-                avatar: user.portrait || user.avatar,
+                nickname: user.account || user.nickname || user.name || '开源中国用户',
+                avatar: normalizeUrl(user.portrait || user.avatar),
                 meta: {
                   followersCount: user.fansCount,
                   articlesCount: user.blogCount,

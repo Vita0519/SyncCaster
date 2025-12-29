@@ -144,7 +144,7 @@ const unboundPlatforms = computed(() => {
 
 const platformUserUrls: Record<string, (userId?: string) => string> = {
   'juejin': (userId) => userId ? `https://juejin.cn/user/${userId}` : 'https://juejin.cn/user/settings/profile',
-  'csdn': (userId) => userId ? `https://blog.csdn.net/${userId}` : 'https://i.csdn.net/#/user-center/profile',
+  'csdn': (userId) => userId ? `https://blog.csdn.net/${userId}?type=blog` : 'https://i.csdn.net/#/user-center/profile',
   'zhihu': (userId) => userId ? `https://www.zhihu.com/people/${userId}` : 'https://www.zhihu.com/settings/profile',
   'wechat': () => 'https://mp.weixin.qq.com/',
   'jianshu': (userId) => {
@@ -276,6 +276,31 @@ function goToUserProfile(account: Account) {
       if (!(account.platform === 'jianshu' && /^\d+$/.test(trimmed))) {
         userId = trimmed;
       }
+    }
+  }
+  if (account.platform === 'csdn') {
+    const profileId = (account.meta as any)?.profileId;
+    if (typeof profileId === 'string' && profileId.trim()) {
+      const trimmed = profileId.trim();
+      if (trimmed !== 'undefined' && (!userId || userId.startsWith('csdn_'))) {
+        userId = trimmed;
+      }
+    }
+    if (userId && userId.startsWith('csdn_')) {
+      const nickname = account.nickname?.trim();
+      if (nickname && /^[a-zA-Z_][a-zA-Z0-9_]{2,}$/.test(nickname) && nickname !== 'CSDN用户') {
+        userId = nickname;
+      }
+    }
+  }
+  if (account.platform === 'segmentfault' && userId) {
+    const isSlug = /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(userId) && !/^\d+$/.test(userId);
+    if (!isSlug) userId = undefined;
+  }
+  if (!userId && account.platform === 'segmentfault') {
+    const nickname = account.nickname?.trim();
+    if (nickname && /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(nickname) && !/^\d+$/.test(nickname)) {
+      userId = nickname;
     }
   }
   if (!userId && account.platform === 'cnblogs') {

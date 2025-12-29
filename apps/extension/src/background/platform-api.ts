@@ -726,7 +726,7 @@ const csdnApi: PlatformApiConfig = {
           return {
             loggedIn: true,
             platform: 'csdn',
-            userId: user.username || user.userName || user.user_name || user.loginName || user.name,
+            userId: user.loginName || user.username || user.userName || user.user_name || user.name,
             nickname: user.nickname || user.nickName || user.name || user.username || user.userName || user.user_name,
             avatar: user.avatar || user.avatarUrl || user.headUrl || user.head_url || user.avatar_url,
             meta: {
@@ -769,7 +769,7 @@ const csdnApi: PlatformApiConfig = {
           return {
             loggedIn: true,
             platform: 'csdn',
-            userId: user.username || user.userName || user.user_name || user.loginName || user.name,
+            userId: user.loginName || user.username || user.userName || user.user_name || user.name,
             nickname: user.nickName || user.nickname || user.name || user.username || user.userName || user.user_name,
             avatar: user.avatar || user.avatarUrl || user.headUrl || user.head_url || user.avatar_url,
             detectionMethod: 'api',
@@ -1606,6 +1606,32 @@ const segmentfaultApi: PlatformApiConfig = {
     // 3. 最后尝试从主页 HTML 中提取用户信息
     
     // 方法1: 尝试思否用户信息 API
+    const normalizeUrl = (url?: unknown): string | undefined => {
+      const candidate =
+        typeof url === 'string'
+          ? url
+          : url && typeof url === 'object'
+            ? (url as any).url || (url as any).src || (url as any).href
+            : undefined;
+      if (typeof candidate !== 'string') return undefined;
+      const trimmed = candidate.trim();
+      if (!trimmed || trimmed === '[object Object]') return undefined;
+      if (trimmed.startsWith('//')) return `https:${trimmed}`;
+      if (trimmed.startsWith('/')) return `https://segmentfault.com${trimmed}`;
+      return trimmed;
+    };
+
+    const normalizeSlug = (raw?: unknown): string | undefined => {
+      if (typeof raw !== 'string') return undefined;
+      const trimmed = raw.trim();
+      if (!trimmed) return undefined;
+      const match = trimmed.match(/\/u\/([^\/?#]+)/);
+      const candidate = (match?.[1] || trimmed).trim();
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(candidate)) return undefined;
+      if (/^\\d+$/.test(candidate)) return undefined;
+      return candidate;
+    };
+
     const apiEndpoints = [
       'https://segmentfault.com/api/users/-/info',
       'https://segmentfault.com/api/user/info',
@@ -1638,11 +1664,25 @@ const segmentfaultApi: PlatformApiConfig = {
                              (user && (user.id || user.uid || user.slug || user.name));
             
             if (isSuccess && user && (user.id || user.uid || user.slug || user.name)) {
-              const userId = String(user.slug || user.name || user.username || user.user_name || user.id || user.uid || '').trim();
+              let userId =
+                normalizeSlug(user.slug) ||
+                normalizeSlug(user.username) ||
+                normalizeSlug(user.user_name) ||
+                normalizeSlug(user.name);
               // 思否 API 中 name 是 URL slug，nickname 才是真实显示名称
               // 优先使用 nickname，其次是 nick，最后才是 name（slug）
-              const nickname = user.nickName || user.nickname || user.nick || user.displayName || '';
-              const avatar = user.avatar || user.avatarUrl || user.avatar_url || user.head || '';
+              const nickname = String(user.nickName || user.nickname || user.nick || user.displayName || userId || '').trim();
+              let avatar = normalizeUrl(user.avatar || user.avatarUrl || user.avatar_url || user.head);
+
+              if (!userId || !avatar) {
+                try {
+                  const htmlResult = await fetchSegmentfaultUserFromHtml();
+                  if (htmlResult.loggedIn) {
+                    userId = userId || htmlResult.userId;
+                    avatar = avatar || htmlResult.avatar;
+                  }
+                } catch {}
+              }
               
               logger.info('segmentfault', `从 API ${endpoint} 获取到用户信息`, { userId, nickname });
               return {
@@ -1713,6 +1753,33 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     }
     
     const html = await res.text();
+    const headerHtml = html.substring(0, 25000);
+
+    const normalizeUrl = (url?: unknown): string | undefined => {
+      const candidate =
+        typeof url === 'string'
+          ? url
+          : url && typeof url === 'object'
+            ? (url as any).url || (url as any).src || (url as any).href
+            : undefined;
+      if (typeof candidate !== 'string') return undefined;
+      const trimmed = candidate.trim();
+      if (!trimmed || trimmed === '[object Object]') return undefined;
+      if (trimmed.startsWith('//')) return `https:${trimmed}`;
+      if (trimmed.startsWith('/')) return `https://segmentfault.com${trimmed}`;
+      return trimmed;
+    };
+
+    const normalizeSlug = (raw?: unknown): string | undefined => {
+      if (typeof raw !== 'string') return undefined;
+      const trimmed = raw.trim();
+      if (!trimmed) return undefined;
+      const match = trimmed.match(/\/u\/([^\/?#]+)/);
+      const candidate = (match?.[1] || trimmed).trim();
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(candidate)) return undefined;
+      if (/^\\d+$/.test(candidate)) return undefined;
+      return candidate;
+    };
     
     // 辅助函数：判断是否是 slug 格式（非真实用户名）
     const isSlugLike = (value: string): boolean => {
@@ -1749,9 +1816,13 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
             return {
               loggedIn: true,
               platform: 'segmentfault',
-              userId: String(user.id || user.uid || user.slug || ''),
+              userId:
+                normalizeSlug(user.slug) ||
+                normalizeSlug(user.username) ||
+                normalizeSlug(user.user_name) ||
+                normalizeSlug(user.name),
               nickname: displayName || '思否用户',
-              avatar: user.avatar || user.avatarUrl || user.avatar_url,
+              avatar: normalizeUrl(user.avatar || user.avatarUrl || user.avatar_url),
               detectionMethod: 'html',
             };
           }
@@ -1784,9 +1855,13 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
             return {
               loggedIn: true,
               platform: 'segmentfault',
-              userId: String(user.id || user.uid || user.slug || ''),
+              userId:
+                normalizeSlug(user.slug) ||
+                normalizeSlug(user.username) ||
+                normalizeSlug(user.user_name) ||
+                normalizeSlug(user.name),
               nickname: displayName || '思否用户',
-              avatar: user.avatar || user.avatarUrl,
+              avatar: normalizeUrl(user.avatar || user.avatarUrl || user.avatar_url),
               detectionMethod: 'html',
             };
           }
@@ -1808,18 +1883,21 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     
     let avatar: string | undefined;
     for (const pattern of avatarPatterns) {
-      const match = html.match(pattern);
+      const match = headerHtml.match(pattern);
       if (match?.[1] && !match[1].includes('default') && !match[1].includes('placeholder')) {
-        avatar = match[1];
+        avatar = normalizeUrl(match[1]);
         break;
       }
     }
     
     // 提取用户 slug（用于获取用户主页）
     let userId: string | undefined;
-    const userSlugMatch = html.match(/<a[^>]+href="\/u\/([^"\/]+)"[^>]*>/i);
+    const userSlugMatch =
+      headerHtml.match(/href="\/u\/([^"\/?#]+)"[^>]*class="[^"]*(?:nav-user|user-dropdown|user-menu|user-avatar|avatar)[^"]*"/i) ||
+      headerHtml.match(/class="[^"]*(?:nav-user|user-dropdown|user-menu|user-avatar|avatar)[^"]*"[^>]*href="\/u\/([^"\/?#]+)"/i) ||
+      headerHtml.match(/href="\/u\/([a-zA-Z0-9][a-zA-Z0-9_-]{1,49})"/i);
     if (userSlugMatch?.[1]) {
-      userId = userSlugMatch[1].trim();
+      userId = normalizeSlug(userSlugMatch[1]);
     }
     
     // 提取用户名 - 优先从导航栏提取
@@ -1830,7 +1908,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     ];
     
     for (const pattern of nicknamePatterns) {
-      const match = html.match(pattern);
+      const match = headerHtml.match(pattern);
       if (match?.[1]) {
         const value = match[1].trim();
         if (value && value.length > 0 && value.length < 50 && !value.includes('<') && !isSlugLike(value)) {
@@ -1884,7 +1962,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
           if (!avatar) {
             const userAvatarMatch = userPageHtml.match(/<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"/i);
             if (userAvatarMatch?.[1] && !userAvatarMatch[1].includes('default')) {
-              avatar = userAvatarMatch[1];
+              avatar = normalizeUrl(userAvatarMatch[1]);
             }
           }
         }
@@ -1899,7 +1977,14 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     const hasLogoutButton = html.includes('退出') || html.includes('logout') || html.includes('signout');
     
     // 如果有退出按钮或用户头像，说明已登录
-    if (hasLogoutButton || avatar || (nickname && !hasLoginButton) || userId) {
+    if (
+      (hasLogoutButton ||
+        headerHtml.includes('user-dropdown') ||
+        headerHtml.includes('nav-user-dropdown') ||
+        headerHtml.includes('user-menu') ||
+        headerHtml.includes('nav-user')) &&
+      !hasLoginButton
+    ) {
       logger.info('segmentfault', '从 HTML DOM 判断已登录', { nickname, avatar: !!avatar, userId });
       return {
         loggedIn: true,
@@ -1947,6 +2032,21 @@ const oschinaApi: PlatformApiConfig = {
     let cookieResult: { hasValidCookie: boolean; userId?: string; noCookieAtAll?: boolean } = { hasValidCookie: false };
     let apiResult: { success: boolean; loggedIn?: boolean; userInfo?: any; error?: string } = { success: false };
     let htmlResult: { success: boolean; loggedIn?: boolean; hasLoginBtn?: boolean; hasLogoutBtn?: boolean; userInfo?: any } = { success: false };
+
+    const normalizeUrl = (url?: unknown, base = 'https://www.oschina.net'): string | undefined => {
+      const candidate =
+        typeof url === 'string'
+          ? url
+          : url && typeof url === 'object'
+            ? (url as any).url || (url as any).src || (url as any).href
+            : undefined;
+      if (typeof candidate !== 'string') return undefined;
+      const trimmed = candidate.trim();
+      if (!trimmed || trimmed === '[object Object]') return undefined;
+      if (trimmed.startsWith('//')) return `https:${trimmed}`;
+      if (trimmed.startsWith('/')) return `${base}${trimmed}`;
+      return trimmed;
+    };
     
     // 1. Cookie 检测 - 获取用户 ID
     try {
@@ -2017,8 +2117,10 @@ const oschinaApi: PlatformApiConfig = {
                 loggedIn: true, 
                 userInfo: {
                   userId: String(user.id),
-                  nickname: user.name || user.nickname || user.account,
-                  avatar: user.portrait || user.avatar || user.img,
+                  nickname: user.account || user.nickname || user.name,
+                  avatar: normalizeUrl(
+                    user.portrait || user.avatar || user.img || user.avatarUrl || user.avatar_url || user.portraitUrl || user.portrait_url
+                  ),
                   meta: {
                     followersCount: user.fansCount || user.fans_count,
                     articlesCount: user.blogCount || user.blog_count,
