@@ -1,6 +1,8 @@
 <template>
   <n-config-provider :theme="theme">
     <n-message-provider>
+      <!-- 内部组件用于获取 message API -->
+      <MessageApiInjector />
       <div 
         class="min-h-screen relative transition-colors duration-300"
         :class="isDark 
@@ -141,9 +143,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, shallowRef, h } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, shallowRef, h, provide, inject } from 'vue';
 import { darkTheme, useMessage } from 'naive-ui';
-import type { DropdownOption } from 'naive-ui';
+import type { DropdownOption, MessageApiInjection } from 'naive-ui';
 import { db } from '@synccaster/core';
 import DashboardView from './views/Dashboard.vue';
 import PostsView from './views/Posts.vue';
@@ -156,7 +158,38 @@ const theme = computed(() => isDark.value ? darkTheme : null);
 const currentPath = ref('dashboard');
 const fileInputRef = ref<HTMLInputElement | null>(null);
 
-const message = useMessage();
+// message API 引用，将在 MessageApiProvider 组件中设置
+const messageApiRef = ref<MessageApiInjection | null>(null);
+
+// 简单的消息提示函数
+function showMessage(type: 'success' | 'error' | 'warning' | 'info', content: string) {
+  if (messageApiRef.value) {
+    messageApiRef.value[type](content);
+  } else {
+    // 后备方案
+    console.log(`[${type}] ${content}`);
+    if (type === 'error') {
+      alert(content);
+    }
+  }
+}
+
+// 提供设置 message API 的方法
+provide('setMessageApi', (api: MessageApiInjection) => {
+  messageApiRef.value = api;
+});
+
+// 内部组件：用于在 n-message-provider 内部获取 message API
+const MessageApiInjector = {
+  setup() {
+    const setMessageApi = inject<(api: MessageApiInjection) => void>('setMessageApi');
+    const message = useMessage();
+    if (setMessageApi) {
+      setMessageApi(message);
+    }
+    return () => null; // 不渲染任何内容
+  }
+};
 
 const navItems = [
   { path: 'dashboard', label: '仪表盘', icon: '📊' },
@@ -238,6 +271,9 @@ async function onFileSelected(event: Event) {
     const content = await file.text();
     const fileName = file.name.replace(/\.(md|markdown)$/i, '');
     
+    // 从 Markdown 内容中提取图片
+    const assets = extractImagesFromMarkdown(content);
+    
     // 创建新文章
     const now = Date.now();
     const newId = crypto.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -253,20 +289,69 @@ async function onFileSelected(event: Event) {
       body_md: content,
       tags: [],
       categories: [],
-      assets: [],
+      assets: assets,
       meta: { importedFrom: file.name }
     } as any);
     
-    message.success(`已导入文章：${fileName}`);
+    const imageCount = assets.length;
+    const msg = imageCount > 0 
+      ? `已导入文章：${fileName}（包含 ${imageCount} 张图片）`
+      : `已导入文章：${fileName}`;
+    showMessage('success', msg);
     
     // 跳转到编辑器
     window.location.hash = `editor/${newId}`;
   } catch (e: any) {
-    message.error(`导入失败：${e?.message || '未知错误'}`);
+    showMessage('error', `导入失败：${e?.message || '未知错误'}`);
   } finally {
     // 清空 input 以便再次选择同一文件
     input.value = '';
   }
+}
+
+// 从 Markdown 内容中提取图片 URL
+function extractImagesFromMarkdown(markdown: string): Array<{ id: string; type: 'image'; url: string; alt: string; title?: string }> {
+  const images: Array<{ id: string; type: 'image'; url: string; alt: string; title?: string }> = [];
+  const seen = new Set<string>();
+  
+  // 匹配 Markdown 图片语法: ![alt](url "title") 或 ![alt](url)
+  const mdImageRegex = /!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g;
+  let match;
+  
+  while ((match = mdImageRegex.exec(markdown)) !== null) {
+    const [, alt, url, title] = match;
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      images.push({
+        id: crypto.randomUUID?.() || `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'image',
+        url: url,
+        alt: alt || '',
+        title: title || undefined,
+      });
+    }
+  }
+  
+  // 匹配 HTML img 标签: <img src="url" alt="alt" title="title">
+  const htmlImageRegex = /<img[^>]+src=["']([^"']+)["'][^>]*>/gi;
+  while ((match = htmlImageRegex.exec(markdown)) !== null) {
+    const url = match[1];
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      // 尝试提取 alt 和 title
+      const altMatch = /alt=["']([^"']*)["']/i.exec(match[0]);
+      const titleMatch = /title=["']([^"']*)["']/i.exec(match[0]);
+      images.push({
+        id: crypto.randomUUID?.() || `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'image',
+        url: url,
+        alt: altMatch?.[1] || '',
+        title: titleMatch?.[1] || undefined,
+      });
+    }
+  }
+  
+  return images;
 }
 
 // 导出功能
@@ -276,20 +361,20 @@ async function handleExport(key: string) {
   const hash = raw.startsWith('/') ? raw.slice(1) : raw;
   
   if (!hash.startsWith('editor/')) {
-    message.warning('请先打开一篇文章再进行导出');
+    showMessage('warning', '请先打开一篇文章再进行导出');
     return;
   }
   
   const postId = hash.slice('editor/'.length);
   if (!postId || postId === 'new') {
-    message.warning('请先保存文章再进行导出');
+    showMessage('warning', '请先保存文章再进行导出');
     return;
   }
   
   try {
     const post = await db.posts.get(postId);
     if (!post) {
-      message.error('文章不存在');
+      showMessage('error', '文章不存在');
       return;
     }
     
@@ -299,12 +384,12 @@ async function handleExport(key: string) {
     switch (key) {
       case 'markdown':
         downloadFile(content, `${sanitizeTitle(title)}.md`, 'text/markdown;charset=utf-8');
-        message.success('已导出 Markdown 文件');
+        showMessage('success', '已导出 Markdown 文件');
         break;
         
       case 'html':
         await exportAsHtml(content, title);
-        message.success('已导出 HTML 文件');
+        showMessage('success', '已导出 HTML 文件');
         break;
         
       case 'pdf':
@@ -316,7 +401,7 @@ async function handleExport(key: string) {
         break;
     }
   } catch (e: any) {
-    message.error(`导出失败：${e?.message || '未知错误'}`);
+    showMessage('error', `导出失败：${e?.message || '未知错误'}`);
   }
 }
 
@@ -338,51 +423,92 @@ function downloadFile(content: string | Blob, filename: string, mimeType?: strin
   URL.revokeObjectURL(url);
 }
 
+// 获取渲染后的预览 HTML（包含 KaTeX 和 Mermaid）
+function getRenderedPreviewHtml(): string | null {
+  const previewEl = document.querySelector('.markdown-preview') as HTMLElement;
+  if (!previewEl) return null;
+  return previewEl.innerHTML;
+}
+
+// 获取导出所需的样式
+function getExportStyles(): string {
+  return `
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; color: #1f2937; }
+    h1, h2, h3, h4, h5, h6 { margin-top: 1.5em; margin-bottom: 0.5em; font-weight: 600; }
+    h1 { font-size: 2em; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.3em; }
+    h2 { font-size: 1.5em; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.3em; }
+    p { margin: 1em 0; }
+    pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
+    code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; font-size: 0.9em; }
+    pre code { background: none; padding: 0; }
+    blockquote { border-left: 4px solid #dfe2e5; margin: 1em 0; padding-left: 16px; color: #6a737d; }
+    img { max-width: 100%; height: auto; }
+    table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+    th, td { border: 1px solid #dfe2e5; padding: 8px 12px; text-align: left; }
+    th { background: #f6f8fa; font-weight: 600; }
+    ul, ol { padding-left: 2em; margin: 1em 0; }
+    li { margin: 0.25em 0; }
+    a { color: #3b82f6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    hr { border: none; border-top: 1px solid #e5e7eb; margin: 2em 0; }
+    /* KaTeX 样式 */
+    .katex { font-size: 1.1em; }
+    .katex-display { overflow-x: auto; overflow-y: hidden; padding: 0.5em 0; }
+    /* Mermaid 样式 */
+    .mermaid-rendered svg { max-width: 100%; height: auto; }
+    .mermaid-source { display: none; }
+    .mermaid-loading { display: none; }
+  `;
+}
+
 // 导出为 HTML
 async function exportAsHtml(markdown: string, title: string) {
-  // 动态导入 marked
-  const { Marked } = await import('marked');
-  const marked = new Marked();
-  const htmlContent = await marked.parse(markdown);
+  // 优先使用已渲染的预览内容（包含 KaTeX 和 Mermaid）
+  let htmlContent = getRenderedPreviewHtml();
   
+  if (!htmlContent) {
+    // 后备：使用 marked 解析
+    const { Marked } = await import('marked');
+    const marked = new Marked();
+    htmlContent = await marked.parse(markdown);
+  }
+  
+  const safeTitle = sanitizeTitle(title);
   const fullHtml = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
-  <title>${sanitizeTitle(title)}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }
-    pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
-    code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; }
-    pre code { background: none; padding: 0; }
-    blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding-left: 16px; color: #6a737d; }
-    img { max-width: 100%; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #dfe2e5; padding: 8px 12px; }
-    th { background: #f6f8fa; }
-  </style>
+  <title>${safeTitle}</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+  <style>${getExportStyles()}</style>
 </head>
 <body>
-  <h1>${sanitizeTitle(title)}</h1>
+  <h1>${safeTitle}</h1>
   ${htmlContent}
 </body>
 </html>`;
   
-  downloadFile(fullHtml, `${sanitizeTitle(title)}.html`, 'text/html');
+  downloadFile(fullHtml, `${safeTitle}.html`, 'text/html');
 }
 
 // 导出为 PDF
 async function exportAsPdf(markdown: string, title: string) {
-  const { Marked } = await import('marked');
-  const marked = new Marked();
-  const htmlContent = await marked.parse(markdown);
+  // 优先使用已渲染的预览内容（包含 KaTeX 和 Mermaid）
+  let htmlContent = getRenderedPreviewHtml();
+  
+  if (!htmlContent) {
+    // 后备：使用 marked 解析
+    const { Marked } = await import('marked');
+    const marked = new Marked();
+    htmlContent = await marked.parse(markdown);
+  }
   
   const safeTitle = sanitizeTitle(title);
   
   // 创建新窗口用于打印
   const printWindow = window.open('', '_blank');
   if (!printWindow) {
-    message.error('无法打开打印窗口，请检查浏览器弹窗设置');
+    showMessage('error', '无法打开打印窗口，请检查浏览器弹窗设置');
     return;
   }
   
@@ -392,24 +518,18 @@ async function exportAsPdf(markdown: string, title: string) {
     <head>
       <meta charset="utf-8">
       <title>${safeTitle}</title>
+      <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 100%; margin: 0 auto; padding: 20px; line-height: 1.6; }
-        pre { background: #f6f8fa; padding: 16px; border-radius: 6px; overflow-x: auto; }
-        code { background: #f6f8fa; padding: 2px 6px; border-radius: 3px; font-family: 'SF Mono', Monaco, monospace; }
-        pre code { background: none; padding: 0; }
-        blockquote { border-left: 4px solid #dfe2e5; margin: 0; padding-left: 16px; color: #6a737d; }
-        img { max-width: 100%; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #dfe2e5; padding: 8px 12px; }
-        th { background: #f6f8fa; }
+        ${getExportStyles()}
         
         @page {
-          margin: 1cm;
+          margin: 1.5cm;
         }
         
         @media print {
-          body { margin: 0; }
+          body { margin: 0; max-width: 100%; }
           * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          pre { white-space: pre-wrap; word-wrap: break-word; }
         }
       </style>
     </head>
@@ -422,14 +542,17 @@ async function exportAsPdf(markdown: string, title: string) {
   
   printWindow.document.close();
   
+  // 等待资源加载完成后再打印
   printWindow.onload = () => {
-    printWindow.print();
-    printWindow.onafterprint = () => {
-      printWindow.close();
-    };
+    setTimeout(() => {
+      printWindow.print();
+      printWindow.onafterprint = () => {
+        printWindow.close();
+      };
+    }, 500); // 给 KaTeX 字体加载一些时间
   };
   
-  message.info('请在打印对话框中选择"另存为 PDF"');
+  showMessage('info', '请在打印对话框中选择"另存为 PDF"');
 }
 
 // 导出为 PNG
@@ -437,7 +560,7 @@ async function exportAsPng(title: string) {
   // 查找预览区域
   const previewEl = document.querySelector('.markdown-preview') as HTMLElement;
   if (!previewEl) {
-    message.error('未找到预览内容，请确保文章已打开');
+    showMessage('error', '未找到预览内容，请确保文章已打开');
     return;
   }
   
@@ -445,20 +568,49 @@ async function exportAsPng(title: string) {
     // 动态导入 html-to-image
     const { toPng } = await import('html-to-image');
     
+    // 克隆元素以避免修改原始 DOM
+    const clonedEl = previewEl.cloneNode(true) as HTMLElement;
+    clonedEl.style.padding = '20px';
+    clonedEl.style.backgroundColor = isDark.value ? '#1f2937' : '#ffffff';
+    
     const dataUrl = await toPng(previewEl, {
       backgroundColor: isDark.value ? '#1f2937' : '#ffffff',
-      skipFonts: true,
-      pixelRatio: Math.max(window.devicePixelRatio || 1, 2),
+      skipFonts: false, // 不跳过字体以确保 KaTeX 正确渲染
+      pixelRatio: Math.min(window.devicePixelRatio || 1, 2), // 限制最大像素比
       style: {
         margin: '0',
         padding: '20px',
       },
+      filter: (node) => {
+        // 过滤掉隐藏的元素
+        if (node instanceof HTMLElement) {
+          const style = window.getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            return false;
+          }
+        }
+        return true;
+      },
     });
     
-    downloadFile(dataUrl, `${sanitizeTitle(title)}.png`, 'image/png');
-    message.success('已导出 PNG 图片');
+    // 将 data URL 转换为 Blob
+    const response = await fetch(dataUrl);
+    const blob = await response.blob();
+    
+    // 下载文件
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${sanitizeTitle(title)}.png`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    
+    showMessage('success', '已导出 PNG 图片');
   } catch (e: any) {
-    message.error(`导出图片失败：${e?.message || '未知错误'}`);
+    console.error('PNG export error:', e);
+    showMessage('error', `导出图片失败：${e?.message || '未知错误'}`);
   }
 }
 </script>
