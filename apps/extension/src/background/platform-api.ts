@@ -1628,7 +1628,7 @@ const segmentfaultApi: PlatformApiConfig = {
       const match = trimmed.match(/\/u\/([^\/?#]+)/);
       const candidate = (match?.[1] || trimmed).trim();
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(candidate)) return undefined;
-      if (/^\\d+$/.test(candidate)) return undefined;
+      if (/^\d+$/.test(candidate)) return undefined;
       return candidate;
     };
 
@@ -1777,7 +1777,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
       const match = trimmed.match(/\/u\/([^\/?#]+)/);
       const candidate = (match?.[1] || trimmed).trim();
       if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(candidate)) return undefined;
-      if (/^\\d+$/.test(candidate)) return undefined;
+      if (/^\d+$/.test(candidate)) return undefined;
       return candidate;
     };
     
@@ -1786,6 +1786,13 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
       const v = value.trim();
       if (!v || v.length > 50) return false;
       return /^[a-zA-Z0-9_-]{2,50}$/.test(v);
+    };
+
+    // 辅助函数：过滤无效的用户名
+    const isValidNickname = (text: string): boolean => {
+      if (!text || text.length > 50) return false;
+      const excludedTexts = ['我的', '设置', '退出', '登录', '登出', 'logout', 'settings', 'profile', '个人中心'];
+      return !excludedTexts.includes(text.trim());
     };
     
     // 1. 尝试从 __INITIAL_STATE__ 或 __NUXT__ 中提取
@@ -1891,14 +1898,41 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     }
     
     // 提取用户 slug（用于获取用户主页）
+    // 关键：只从导航栏/header 区域提取，避免误匹配文章作者
     let userId: string | undefined;
-    const userSlugMatch =
-      headerHtml.match(/href="\/u\/([^"\/?#]+)"[^>]*class="[^"]*(?:nav-user|user-dropdown|user-menu|user-avatar|avatar)[^"]*"/i) ||
-      headerHtml.match(/class="[^"]*(?:nav-user|user-dropdown|user-menu|user-avatar|avatar)[^"]*"[^>]*href="\/u\/([^"\/?#]+)"/i) ||
-      headerHtml.match(/href="\/u\/([a-zA-Z0-9][a-zA-Z0-9_-]{1,49})"/i);
-    if (userSlugMatch?.[1]) {
-      userId = normalizeSlug(userSlugMatch[1]);
+
+    // 1. 首先尝试从导航栏下拉菜单区域匹配（最可靠）
+    // 思否的用户下拉菜单通常包含 dropdown 类，且用户主页链接在其中
+    // 注意：要区分"我的主页"链接和文章作者链接
+    const dropdownUserMatch =
+      // 用户下拉菜单内的"我的主页"或用户链接（通常是第一个 /u/ 链接）
+      headerHtml.match(/<[^>]*class="[^"]*(?:nav-user-dropdown|user-dropdown|user-menu)[^"]*"[^>]*>[\s\S]*?href="\/u\/([a-zA-Z0-9][a-zA-Z0-9_-]{1,49})"[^>]*>/i) ||
+      // 下拉菜单内的用户链接
+      headerHtml.match(/<[^>]*class="[^"]*dropdown[^"]*"[^>]*>[\s\S]*?href="\/u\/([a-zA-Z0-9][a-zA-Z0-9_-]{1,49})"[^>]*>/i) ||
+      // 带有 nav-user/user-dropdown 类的元素内的链接
+      headerHtml.match(/class="[^"]*(?:nav-user|user-dropdown|user-menu)[^"]*"[\s\S]*?href="\/u\/([a-zA-Z0-9][a-zA-Z0-9_-]{1,49})"/i) ||
+      // href 和 class 顺序可能相反
+      headerHtml.match(/href="\/u\/([^"\/?#]+)"[^>]*class="[^"]*(?:nav-user|user-dropdown|user-menu|user-avatar)[^"]*"/i) ||
+      headerHtml.match(/class="[^"]*(?:nav-user|user-dropdown|user-menu|user-avatar)[^"]*"[^>]*href="\/u\/([^"\/?#]+)"/i);
+
+    if (dropdownUserMatch?.[1]) {
+      userId = normalizeSlug(dropdownUserMatch[1]);
+      logger.info('segmentfault', '从导航栏下拉菜单提取到 userId', { userId });
     }
+
+    // 2. 如果没找到，尝试从 header 标签内匹配（但要更严格）
+    // 只匹配导航栏区域，不匹配页面内容
+    if (!userId) {
+      // 匹配 <header> 标签内的用户链接（限定在前 5000 字符，通常是导航栏）
+      const navHtml = headerHtml.substring(0, 5000);
+      const headerTagMatch = navHtml.match(/<header[^>]*>[\s\S]*?href="\/u\/([a-zA-Z0-9][a-zA-Z0-9_-]{1,49})"[\s\S]*?<\/header>/i);
+      if (headerTagMatch?.[1]) {
+        userId = normalizeSlug(headerTagMatch[1]);
+        logger.info('segmentfault', '从 header 标签提取到 userId', { userId });
+      }
+    }
+
+    // 3. 不再使用通用的 /u/ 链接匹配，因为这会误匹配文章作者
     
     // 提取用户名 - 优先从导航栏提取
     let nickname: string | undefined;
@@ -1911,7 +1945,8 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
       const match = headerHtml.match(pattern);
       if (match?.[1]) {
         const value = match[1].trim();
-        if (value && value.length > 0 && value.length < 50 && !value.includes('<') && !isSlugLike(value)) {
+        if (value && value.length > 0 && value.length < 50 && !value.includes('<') &&
+            !isSlugLike(value) && isValidNickname(value)) {
           nickname = value;
           break;
         }
@@ -1949,8 +1984,8 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
             const match = userPageHtml.match(pattern);
             if (match?.[1]) {
               const value = match[1].trim();
-              // 验证是有效的用户名（不是 slug，不是空白，长度合理）
-              if (value && value.length > 0 && value.length < 50 && !isSlugLike(value)) {
+              // 验证是有效的用户名（不是 slug，不是空白，长度合理，不是菜单文本）
+              if (value && value.length > 0 && value.length < 50 && !isSlugLike(value) && isValidNickname(value)) {
                 nickname = value;
                 logger.info('segmentfault', '从用户主页提取到用户名', { nickname });
                 break;
@@ -2112,12 +2147,14 @@ const oschinaApi: PlatformApiConfig = {
               logger.info('oschina', 'API 明确返回未登录');
             } else if (user && user.id) {
               // API 返回的数据是最可靠的
-              apiResult = { 
-                success: true, 
-                loggedIn: true, 
+              // 开源中国用户名可能在 account、nick、nickname、name 等字段
+              const nickname = user.account || user.nick || user.nickname || user.name || user.userName || user.user_name;
+              apiResult = {
+                success: true,
+                loggedIn: true,
                 userInfo: {
                   userId: String(user.id),
-                  nickname: user.account || user.nickname || user.name,
+                  nickname: nickname,
                   avatar: normalizeUrl(
                     user.portrait || user.avatar || user.img || user.avatarUrl || user.avatar_url || user.portraitUrl || user.portrait_url
                   ),
@@ -2127,7 +2164,7 @@ const oschinaApi: PlatformApiConfig = {
                   }
                 }
               };
-              logger.info('oschina', '从 API 获取到用户信息', { id: user.id, name: user.name });
+              logger.info('oschina', '从 API 获取到用户信息', { id: user.id, nickname });
             }
           } catch (parseErr: any) {
             logger.warn('oschina', 'API 响应解析失败', { error: parseErr?.message || String(parseErr) });
@@ -2155,40 +2192,54 @@ const oschinaApi: PlatformApiConfig = {
           // 从用户主页提取信息（这里的信息是用户专属的，不会误抓）
           let nickname: string | undefined;
           let avatar: string | undefined;
-          
+
           // 用户主页的昵称提取策略（按优先级）：
-          // 1. 从用户信息区域的 h2/h3 标签提取（最可靠）
+          // 1. 从用户信息区域的特定元素提取（最可靠）
           // 2. 从 <title> 标签提取
-          
+
           // 方法1：从用户信息区域提取昵称
-          // 开源中国用户主页结构：用户名通常在 .user-info-name 或 .user-header 区域
+          // 开源中国用户主页结构可能变化，需要多种匹配模式
           const userNamePatterns = [
-            // 用户信息区域的昵称（最可靠）
+            // 用户信息卡片中的用户名（最新结构）
+            /<div[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/div>/i,
+            /<span[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/span>/i,
+            /<h1[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/h1>/i,
+            /<h2[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/h2>/i,
+            // 用户名链接（开源中国常见结构）
+            /<a[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/a>/i,
+            /<a[^>]*class="[^"]*name[^"]*"[^>]*>([^<]+)<\/a>/i,
+            // 用户信息区域的昵称
             /<div[^>]*class="[^"]*user-info-name[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i,
             /<div[^>]*class="[^"]*user-header[^"]*"[^>]*>[\s\S]*?<h2[^>]*>([^<]+)<\/h2>/i,
             /<div[^>]*class="[^"]*user-header[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i,
-            // 用户名链接
-            /<a[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/a>/i,
-            /<a[^>]*class="[^"]*name[^"]*"[^>]*href="[^"]*\/u\/\d+[^"]*"[^>]*>([^<]+)<\/a>/i,
+            // 页面中的 h1/h2 标签（用户名）
+            /<h1[^>]*>([^<]+)<\/h1>/i,
+            /<h2[^>]*class="[^"]*name[^"]*"[^>]*>([^<]+)<\/h2>/i,
+            // 更通用的用户链接匹配
+            /<a[^>]*href="[^"]*\/u\/\d+[^"]*"[^>]*>([^<]+)<\/a>/i,
             // 用户信息卡片中的昵称
             /<div[^>]*class="[^"]*user-info[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i,
             // 页面中的 h2/h3 用户名（限定在用户信息区域）
             /<div[^>]*class="[^"]*header[^"]*"[^>]*>[\s\S]*?<h2[^>]*>([^<]+)<\/h2>/i,
+            // 用户昵称/账号名（开源中国自动生成的用户名格式为 osc_XXXXXXXX）
+            /<span[^>]*class="[^"]*(?:nickname|account|name)[^"]*"[^>]*>([^<]+)<\/span>/i,
+            /<div[^>]*class="[^"]*(?:nickname|account|name)[^"]*"[^>]*>([^<]+)<\/div>/i,
           ];
-          
+
           for (const pattern of userNamePatterns) {
             const match = userPageHtml.match(pattern);
             if (match?.[1]) {
               const value = match[1].trim();
-              // 验证是有效的用户名（不是空白，长度合理，不是数字ID）
-              if (value && value.length > 0 && value.length < 30 && !/^\d+$/.test(value)) {
+              // 验证是有效的用户名（不是空白，长度合理）
+              // 注意：开源中国的自动生成用户名格式为 osc_XXXXXXXX，需要支持
+              if (value && value.length > 0 && value.length < 50 && !/^\d+$/.test(value)) {
                 nickname = value;
                 logger.info('oschina', '从用户主页提取到昵称', { nickname, pattern: pattern.toString().substring(0, 50) });
                 break;
               }
             }
           }
-          
+
           // 方法2：从 <title> 标签提取（备用）
           if (!nickname) {
             const titleMatch = userPageHtml.match(/<title>([^<]+)<\/title>/i);
@@ -2202,37 +2253,51 @@ const oschinaApi: PlatformApiConfig = {
                 .replace(/\s*-\s*OSCHINA.*$/i, '')
                 .replace(/\s*\|.*$/i, '')
                 .trim();
-              if (cleanTitle && cleanTitle.length > 0 && cleanTitle.length < 30 && !/^\d+$/.test(cleanTitle)) {
+              // 支持 osc_ 开头的用户名
+              if (cleanTitle && cleanTitle.length > 0 && cleanTitle.length < 50 && !/^\d+$/.test(cleanTitle)) {
                 nickname = cleanTitle;
                 logger.info('oschina', '从 title 提取到昵称', { nickname });
               }
             }
           }
-          
-          // 用户主页头像 - 通常在 user-portrait 或 avatar 容器中
-          // 只匹配用户头像区域，排除文章列表中的头像
+
+          // 用户主页头像提取 - 放宽过滤条件
+          // 开源中国的头像可能在多种位置和使用不同的 CDN
           const avatarPatterns = [
+            // 用户头像区域（最常见）- class 在 src 前面
+            /<img[^>]+class="[^"]*(?:user-avatar|portrait|avatar)[^"]*"[^>]+src=["']([^"']+)["']/i,
+            // src 在 class 前面
+            /<img[^>]+src=["']([^"']+)["'][^>]+class="[^"]*(?:user-avatar|portrait|avatar)[^"]*"/i,
+            // 用户头像区域（div 包裹）
+            /<div[^>]*class="[^"]*(?:user-portrait|portrait|avatar|user-avatar)[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
             // 用户信息区域的头像
-            /<div[^>]*class="[^"]*user-portrait[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
             /<div[^>]*class="[^"]*user-header[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
-            /<div[^>]*class="[^"]*portrait[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
-            // 带有 user-avatar 类的图片
-            /<img[^>]+class="[^"]*user-avatar[^"]*"[^>]+src=["']([^"']+)["']/i,
+            // 头像链接中的图片
+            /<a[^>]*class="[^"]*(?:avatar|portrait)[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
             // 用户信息卡片中的头像
             /<div[^>]*class="[^"]*user-info[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
-            // 头像链接中的图片
-            /<a[^>]*class="[^"]*avatar[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
+            // 更通用的头像匹配 - 开源中国 CDN
+            /<img[^>]+src=["'](https?:\/\/[^"']*oscimg[^"']+)["']/i,
+            /<img[^>]+src=["'](https?:\/\/[^"']*static\.oschina[^"']+)["']/i,
+            // 任何包含 avatar 的图片
+            /<img[^>]+src=["']([^"']+avatar[^"']+)["']/i,
+            // 任何包含 portrait 的图片
+            /<img[^>]+src=["']([^"']+portrait[^"']+)["']/i,
           ];
-          
+
           for (const pattern of avatarPatterns) {
             const match = userPageHtml.match(pattern);
             if (match?.[1]) {
               const url = match[1].trim();
-              // 验证是用户头像 URL（通常包含 oscimg 或特定路径）
-              if (url && url.startsWith('http') && 
-                  (url.includes('oscimg.oschina.net') || url.includes('/portrait/') || url.includes('/avatar/')) &&
-                  !url.includes('logo') && !url.includes('icon') && !url.includes('default')) {
-                avatar = url;
+              // 放宽验证条件：只要是有效的 URL 且不是明显的 logo/icon
+              if (url && (url.startsWith('http') || url.startsWith('//')) &&
+                  !url.includes('logo') && !url.includes('icon') &&
+                  !url.includes('favicon') && !url.includes('sprite') &&
+                  !url.includes('loading') && !url.includes('placeholder') &&
+                  !url.includes('default')) {
+                // 处理 // 开头的 URL
+                avatar = url.startsWith('//') ? `https:${url}` : url;
+                logger.info('oschina', '从用户主页提取到头像', { avatar });
                 break;
               }
             }

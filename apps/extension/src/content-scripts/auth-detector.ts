@@ -1148,11 +1148,12 @@ const aliyunDetector: PlatformAuthDetector = {
 // 思否检测器 - 多重检测策略
 // ============================================================
 // 思否检测器 - 多重检测策略（优化版）
-// 
+//
 // 思否网站特点：
 // 1. 登录后页面右上角显示用户头像
 // 2. 用户主页格式：https://segmentfault.com/u/{slug}
 // 3. 页面可能包含 __INITIAL_STATE__ 全局变量
+// 4. 注意：页面中可能有多个用户链接（如文章作者），需要精确定位当前登录用户
 // ============================================================
 const segmentfaultDetector: PlatformAuthDetector = {
   id: 'segmentfault',
@@ -1171,67 +1172,144 @@ const segmentfaultDetector: PlatformAuthDetector = {
       return match?.[1];
     })();
     log('segmentfault', '检测登录状态...');
-    
-    // 辅助函数：从 DOM 中提取用户信息
+
+    // 辅助函数：从 DOM 中提取当前登录用户信息
+    // 关键：只从导航栏右上角的用户下拉菜单区域提取，避免误提取文章作者
     const extractUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
       let nickname: string | undefined;
       let avatar: string | undefined;
       let userId: string | undefined;
 
-      const considerNickname = (raw?: string) => {
-        const text = raw?.trim();
-        if (!text || text.length >= 50) return;
+      const excludedTexts = ['我的', '设置', '退出', '登录', '登出', 'logout', 'settings', 'profile', '个人中心', '写文章', '提问题', '我的主页', '消息', '收藏', '关注'];
 
-        if (slugFromUrl && text === slugFromUrl && nickname && nickname !== slugFromUrl) return;
-
-        if (!nickname) {
-          nickname = text;
-          return;
-        }
-
-        const currentSlugLike = isSegmentfaultSlugLike(nickname);
-      const nextSlugLike = isSegmentfaultSlugLike(text);
-      if (currentSlugLike && !nextSlugLike) nickname = text;
+      const isValidNickname = (text?: string): boolean => {
+        if (!text) return false;
+        const trimmed = text.trim();
+        if (!trimmed || trimmed.length >= 50) return false;
+        if (excludedTexts.some(excluded => trimmed === excluded || trimmed.toLowerCase() === excluded.toLowerCase())) return false;
+        // 排除纯 slug 格式的文本
+        if (isSegmentfaultSlugLike(trimmed)) return false;
+        return true;
       };
-      
-      // 1. 尝试从导航栏用户头像区域提取
-      const navUserSelectors = [
-        '.nav-user',
-        '.user-nav',
-        '.header-user',
-        '.navbar-user',
-        '[class*="nav"][class*="user"]',
-        '[class*="header"][class*="user"]',
-      ];
-      
-      for (const selector of navUserSelectors) {
-        const navUser = document.querySelector(selector);
-        if (navUser) {
-          // 提取头像
-          const avatarImg = navUser.querySelector('img') as HTMLImageElement;
-          if (avatarImg?.src && !avatarImg.src.includes('default') && !avatarImg.src.includes('placeholder')) {
-            avatar = avatarImg.src;
-          }
-          
-          // 提取用户名
-          const nameEl = navUser.querySelector('[class*="name"], [class*="nick"], a[href^="/u/"]');
-          if (nameEl) {
-            considerNickname(nameEl.textContent || undefined);
-          }
-          
-          // 提取用户 slug
-          const userLink = navUser.querySelector('a[href^="/u/"]') as HTMLAnchorElement;
-          if (userLink) {
-            const match = userLink.href.match(/\/u\/([^\/\?]+)/);
-            if (match?.[1] && isSegmentfaultSlugLike(match[1])) {
-              userId = match[1].trim();
+
+      // 1. 思否登录后，右上角有用户下拉菜单
+      // 关键选择器：导航栏中的 dropdown 或 user 相关区域
+      // 注意：只匹配导航栏顶部区域，不要匹配页面内容中的用户信息
+
+      // 首先尝试从 header/navbar 中的下拉菜单获取
+      const headerEl = document.querySelector('header, .navbar, nav, [class*="header"]');
+      if (headerEl) {
+        // 在 header 中查找用户下拉菜单
+        // 思否的用户下拉菜单通常有特定的类名
+        const dropdownSelectors = [
+          '.nav-user-dropdown', // 思否特有的用户下拉菜单
+          '.user-dropdown',
+          '[class*="nav-user"]',
+          '.dropdown', // 通用下拉菜单
+          '[class*="dropdown"]',
+          '[class*="user-menu"]',
+        ];
+
+        for (const selector of dropdownSelectors) {
+          const dropdowns = headerEl.querySelectorAll(selector);
+          for (const dropdown of dropdowns) {
+            // 检查是否是用户相关的下拉菜单（包含用户链接）
+            const userLinks = dropdown.querySelectorAll('a[href*="/u/"]') as NodeListOf<HTMLAnchorElement>;
+            
+            // 遍历所有用户链接，找到当前登录用户的链接
+            // 通常第一个用户链接是当前登录用户的主页链接
+            for (const userLink of userLinks) {
+              const href = userLink.href || userLink.getAttribute('href') || '';
+              const match = href.match(/\/u\/([^\/\?#]+)/);
+              if (match?.[1] && isSegmentfaultSlugLike(match[1])) {
+                // 检查这个链接是否在下拉菜单的触发器区域（而不是菜单项）
+                // 或者是否是"我的主页"类型的链接
+                const linkText = userLink.textContent?.trim() || '';
+                const isProfileLink = linkText.includes('主页') || linkText.includes('profile') || 
+                                     userLink.classList.contains('user-link') ||
+                                     userLink.closest('.dropdown-toggle, .dropdown-trigger, [data-toggle]');
+                
+                if (isProfileLink || !userId) {
+                  userId = match[1].trim();
+                  log('segmentfault', '从导航栏下拉菜单提取到 userId', { userId, linkText });
+                }
+              }
+            }
+
+            if (userId) {
+              // 提取头像 - 优先从下拉菜单触发器中获取
+              const triggerImg = dropdown.querySelector(':scope > a img, :scope > button img, :scope > div > img, .dropdown-toggle img, [data-toggle] img') as HTMLImageElement;
+              if (triggerImg?.src && !triggerImg.src.includes('default') && !triggerImg.src.includes('placeholder')) {
+                avatar = triggerImg.src;
+              }
+
+              // 如果没有直接子图片，尝试其他位置
+              if (!avatar) {
+                const anyImg = dropdown.querySelector('img[src*="avatar"], img[class*="avatar"], img[src*="cdn.segmentfault"]') as HTMLImageElement;
+                if (anyImg?.src && !anyImg.src.includes('default') && !anyImg.src.includes('placeholder')) {
+                  avatar = anyImg.src;
+                }
+              }
+
+              // 提取昵称 - 从下拉菜单内的用户链接文本或特定元素
+              // 注意：不要使用下拉菜单中的菜单项文本（如"我的主页"、"设置"等）
+              const nicknameSelectors = [
+                '[class*="nickname"]',
+                '[class*="user-name"]',
+                '[class*="username"]',
+                '.dropdown-toggle span',
+                '[data-toggle] span',
+              ];
+
+              for (const nickSelector of nicknameSelectors) {
+                const nickEl = dropdown.querySelector(nickSelector);
+                if (nickEl && isValidNickname(nickEl.textContent)) {
+                  nickname = nickEl.textContent!.trim();
+                  break;
+                }
+              }
+
+              break; // 找到用户 slug 后跳出
             }
           }
-          
-          if (avatar || nickname) break;
+          if (userId) break;
         }
       }
-      
+
+      // 2. 如果还没找到，尝试从更通用的导航区域查找
+      // 但要更加严格，只匹配明确的用户区域
+      if (!userId) {
+        // 查找导航栏中的用户头像区域
+        const userAvatarSelectors = [
+          'header img[class*="avatar"]',
+          'nav img[class*="avatar"]',
+          '.navbar img[class*="avatar"]',
+          '[class*="header"] img[class*="avatar"]',
+        ];
+
+        for (const selector of userAvatarSelectors) {
+          const avatarImg = document.querySelector(selector) as HTMLImageElement;
+          if (avatarImg?.src && !avatarImg.src.includes('default') && !avatarImg.src.includes('placeholder')) {
+            // 找到头像后，查找附近的用户链接
+            const parentEl = avatarImg.closest('a[href*="/u/"], [class*="dropdown"], [class*="user"]');
+            if (parentEl) {
+              const userLink = parentEl.querySelector('a[href*="/u/"]') as HTMLAnchorElement || 
+                              (parentEl.tagName === 'A' ? parentEl as HTMLAnchorElement : null);
+              if (userLink) {
+                const href = userLink.href || userLink.getAttribute('href') || '';
+                const match = href.match(/\/u\/([^\/\?#]+)/);
+                if (match?.[1] && isSegmentfaultSlugLike(match[1])) {
+                  userId = match[1].trim();
+                  avatar = avatarImg.src;
+                  log('segmentfault', '从导航区域头像提取到 userId', { userId });
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
       return { nickname, avatar, userId };
     };
     
@@ -1534,76 +1612,139 @@ const oschinaDetector: PlatformAuthDetector = {
     };
     
     // 辅助函数：从 DOM 中提取用户信息
+    // 开源中国的用户信息通常在页面顶部导航栏的用户下拉菜单中
     const extractUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
       let nickname: string | undefined;
       let avatar: string | undefined;
       let userId: string | undefined;
       
-      // 1. 尝试从导航栏用户区域提取
-      const userNavSelectors = [
-        '.user-info',
-        '.current-user',
-        '.header-user',
-        '.nav-user',
-        '#userSidebar',
-        '.user-nav',
-        '[class*="user"][class*="info"]',
-        '[class*="user"][class*="nav"]',
-      ];
+      // 排除的文本（菜单项、按钮等）
+      const excludedTexts = ['登录', '注册', '退出', '设置', '我的', '消息', '收藏', '关注', '开源中国', 'OSCHINA'];
       
-      for (const selector of userNavSelectors) {
-        try {
-          const userNav = document.querySelector(selector);
-          if (userNav) {
-            // 提取头像
-            const avatarImg = userNav.querySelector('img') as HTMLImageElement;
-            if (avatarImg?.src && avatarImg.src.includes('http') && !avatarImg.src.includes('default')) {
-              avatar = avatarImg.src;
-            }
-            
-            // 提取昵称
-            const nameEl = userNav.querySelector('[class*="name"], [class*="nick"], a[href*="/u/"]');
-            if (nameEl?.textContent?.trim()) {
-              nickname = nameEl.textContent.trim();
-            }
-            
-            // 提取用户 ID
-            const userLink = userNav.querySelector('a[href*="/u/"]') as HTMLAnchorElement;
-            if (userLink) {
-              const match = userLink.href.match(/\/u\/(\d+)/);
+      const isValidNickname = (text?: string): boolean => {
+        if (!text) return false;
+        const trimmed = text.trim();
+        if (!trimmed || trimmed.length >= 50 || trimmed.length < 2) return false;
+        if (excludedTexts.some(excluded => trimmed === excluded || trimmed.toLowerCase() === excluded.toLowerCase())) return false;
+        return true;
+      };
+      
+      // 1. 尝试从导航栏用户区域提取（最可靠）
+      // 开源中国的用户下拉菜单通常在页面顶部
+      const headerEl = document.querySelector('header, .header, nav, .navbar, [class*="header"]');
+      if (headerEl) {
+        // 查找用户下拉菜单或用户信息区域
+        const userAreaSelectors = [
+          '.user-dropdown',
+          '.user-menu',
+          '.user-info',
+          '.current-user',
+          '[class*="user"][class*="dropdown"]',
+          '[class*="user"][class*="menu"]',
+          '[class*="user"][class*="info"]',
+          '.header-user',
+          '.nav-user',
+        ];
+        
+        for (const selector of userAreaSelectors) {
+          const userArea = headerEl.querySelector(selector) || document.querySelector(selector);
+          if (userArea) {
+            // 提取用户 ID - 从用户主页链接
+            const userLinks = userArea.querySelectorAll('a[href*="/u/"]') as NodeListOf<HTMLAnchorElement>;
+            for (const link of userLinks) {
+              const href = link.href || link.getAttribute('href') || '';
+              const match = href.match(/\/u\/(\d+)/);
               if (match?.[1]) {
                 userId = match[1];
+                // 如果链接文本是有效的用户名，使用它
+                const linkText = link.textContent?.trim();
+                if (isValidNickname(linkText)) {
+                  nickname = linkText;
+                }
+                log('oschina', '从用户区域提取到 userId', { userId, nickname });
+                break;
               }
             }
             
-            if (avatar || nickname || userId) break;
+            // 提取头像 - 优先从用户区域的 img 标签获取
+            if (!avatar) {
+              const avatarSelectors = [
+                'img[class*="avatar"]',
+                'img[class*="portrait"]',
+                'img[src*="oscimg"]',
+                'img[src*="static.oschina"]',
+                'img[src*="avatar"]',
+                'img',
+              ];
+              for (const imgSelector of avatarSelectors) {
+                const img = userArea.querySelector(imgSelector) as HTMLImageElement;
+                if (img?.src && img.src.includes('http') && 
+                    !img.src.includes('default') && !img.src.includes('placeholder') &&
+                    !img.src.includes('logo') && !img.src.includes('icon')) {
+                  avatar = img.src;
+                  log('oschina', '从用户区域提取到头像', { avatar });
+                  break;
+                }
+              }
+            }
+            
+            // 提取昵称 - 如果还没有
+            if (!nickname) {
+              const nicknameSelectors = [
+                '[class*="name"]',
+                '[class*="nick"]',
+                '[class*="account"]',
+                'span',
+              ];
+              for (const nickSelector of nicknameSelectors) {
+                const nickEl = userArea.querySelector(nickSelector);
+                if (nickEl && isValidNickname(nickEl.textContent)) {
+                  nickname = nickEl.textContent!.trim();
+                  break;
+                }
+              }
+            }
+            
+            if (userId || avatar || nickname) break;
           }
-        } catch {}
+        }
       }
       
-      // 2. 尝试从页面中的用户链接提取
+      // 2. 尝试从页面中的用户链接提取（备用）
       if (!userId) {
-        const userLinks = document.querySelectorAll('a[href*="my.oschina.net/u/"]');
-        for (const link of userLinks) {
+        // 只在导航区域查找，避免误匹配文章作者
+        const navUserLinks = document.querySelectorAll('header a[href*="my.oschina.net/u/"], nav a[href*="my.oschina.net/u/"], .header a[href*="my.oschina.net/u/"]');
+        for (const link of navUserLinks) {
           const href = (link as HTMLAnchorElement).href;
           const match = href.match(/\/u\/(\d+)/);
           if (match?.[1]) {
             userId = match[1];
-            if (!nickname && link.textContent?.trim()) {
-              nickname = link.textContent.trim();
+            const linkText = link.textContent?.trim();
+            if (!nickname && isValidNickname(linkText)) {
+              nickname = linkText;
             }
+            log('oschina', '从导航区域链接提取到 userId', { userId });
             break;
           }
         }
       }
       
-      // 3. 尝试从头像图片提取
+      // 3. 尝试从导航栏头像图片提取（备用）
       if (!avatar) {
-        const avatarImgs = document.querySelectorAll('img[class*="avatar"], img[src*="oscimg.oschina.net"]');
-        for (const img of avatarImgs) {
-          const src = (img as HTMLImageElement).src;
-          if (src && src.includes('http') && !src.includes('default') && !src.includes('placeholder')) {
-            avatar = src;
+        const headerAvatarSelectors = [
+          'header img[class*="avatar"]',
+          'header img[src*="oscimg"]',
+          'nav img[class*="avatar"]',
+          '.header img[class*="avatar"]',
+          '.navbar img[class*="avatar"]',
+        ];
+        for (const selector of headerAvatarSelectors) {
+          const img = document.querySelector(selector) as HTMLImageElement;
+          if (img?.src && img.src.includes('http') && 
+              !img.src.includes('default') && !img.src.includes('placeholder') &&
+              !img.src.includes('logo') && !img.src.includes('icon')) {
+            avatar = img.src;
+            log('oschina', '从导航栏头像提取', { avatar });
             break;
           }
         }
@@ -1633,16 +1774,18 @@ const oschinaDetector: PlatformAuthDetector = {
     // 2. 检查全局变量
     const win = window as any;
     if (win.G_USER?.id) {
-      log('oschina', '从全局变量 G_USER 获取到用户信息', { id: win.G_USER.id, name: win.G_USER.name });
+      log('oschina', '从全局变量 G_USER 获取到用户信息', { id: win.G_USER.id, name: win.G_USER.name, account: win.G_USER.account });
+      // 开源中国用户名可能在 account、name、nick、nickname 等字段
+      const nickname = win.G_USER.account || win.G_USER.nick || win.G_USER.nickname || win.G_USER.name || win.G_USER.userName || win.G_USER.user_name;
       return {
         loggedIn: true,
         platform: 'oschina',
         userId: String(win.G_USER.id),
-        nickname: win.G_USER.account || win.G_USER.name || '开源中国用户',
-        avatar: normalizeUrl(win.G_USER.portrait || win.G_USER.avatar),
+        nickname: nickname || '开源中国用户',
+        avatar: normalizeUrl(win.G_USER.portrait || win.G_USER.avatar || win.G_USER.img || win.G_USER.avatarUrl),
       };
     }
-    
+
     // 检查其他可能的全局变量
     const possibleUserVars = [
       win.__USER__,
@@ -1650,48 +1793,52 @@ const oschinaDetector: PlatformAuthDetector = {
       win.pageData?.user,
       win.currentUser,
     ];
-    
+
     for (const userData of possibleUserVars) {
       if (userData && (userData.id || userData.uid)) {
         log('oschina', '从全局变量获取到用户信息', userData);
+        // 尝试多种可能的用户名字段
+        const nickname = userData.account || userData.nick || userData.nickname || userData.name || userData.userName || userData.user_name;
         return {
           loggedIn: true,
           platform: 'oschina',
           userId: String(userData.id || userData.uid),
-          nickname: userData.account || userData.nickname || userData.name || '开源中国用户',
-          avatar: normalizeUrl(userData.portrait || userData.avatar),
+          nickname: nickname || '开源中国用户',
+          avatar: normalizeUrl(userData.portrait || userData.avatar || userData.img || userData.avatarUrl),
         };
       }
     }
-    
+
     // 3. 尝试 API
     try {
       const res = await fetch('https://www.oschina.net/action/user/info', {
         credentials: 'include',
-        headers: { 
+        headers: {
           'Accept': 'application/json, text/plain, */*',
           'X-Requested-With': 'XMLHttpRequest',
         },
       });
-      
+
       if (res.ok) {
         const text = await res.text();
         log('oschina', 'API 响应', { status: res.status, text: text.substring(0, 300) });
-        
+
         // 检查是否是 HTML（重定向到登录页）
         if (!text.includes('<!DOCTYPE') && !text.includes('<html')) {
           try {
             const data = JSON.parse(text);
             const user = data.result || data.data || data;
-            
+
             if (user && user.id) {
-              log('oschina', '从 API 获取到用户信息', { id: user.id, name: user.name });
+              log('oschina', '从 API 获取到用户信息', { id: user.id, name: user.name, account: user.account, nick: user.nick });
+              // 尝试多种可能的用户名字段
+              const nickname = user.account || user.nick || user.nickname || user.name || user.userName || user.user_name;
               return {
                 loggedIn: true,
                 platform: 'oschina',
                 userId: String(user.id),
-                nickname: user.account || user.nickname || user.name || '开源中国用户',
-                avatar: normalizeUrl(user.portrait || user.avatar),
+                nickname: nickname || '开源中国用户',
+                avatar: normalizeUrl(user.portrait || user.avatar || user.img || user.avatarUrl || user.avatar_url || user.portraitUrl),
                 meta: {
                   followersCount: user.fansCount,
                   articlesCount: user.blogCount,

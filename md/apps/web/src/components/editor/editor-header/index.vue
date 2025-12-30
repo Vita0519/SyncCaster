@@ -15,7 +15,6 @@ import { publishToWechat, isExtensionEnvironment as isInExtension } from '@/util
 import EditDropdown from './EditDropdown.vue'
 import FileDropdown from './FileDropdown.vue'
 import FormatDropdown from './FormatDropdown.vue'
-import HelpDropdown from './HelpDropdown.vue'
 import InsertDropdown from './InsertDropdown.vue'
 import StyleDropdown from './StyleDropdown.vue'
 import ViewDropdown from './ViewDropdown.vue'
@@ -74,18 +73,7 @@ function editorRefresh() {
 }
 
 // 对话框状态
-const aboutDialogVisible = ref(false)
-const fundDialogVisible = ref(false)
 const editorStateDialogVisible = ref(false)
-
-// 处理帮助菜单事件
-function handleOpenAbout() {
-  aboutDialogVisible.value = true
-}
-
-function handleOpenFund() {
-  fundDialogVisible.value = true
-}
 
 function handleOpenEditorState() {
   editorStateDialogVisible.value = true
@@ -324,7 +312,6 @@ async function handlePublishToWechat() {
         <InsertDropdown />
         <StyleDropdown />
         <ViewDropdown />
-        <HelpDropdown @open-about="handleOpenAbout" @open-fund="handleOpenFund" />
       </Menubar>
     </div>
 
@@ -344,7 +331,6 @@ async function handlePublishToWechat() {
             <InsertDropdown :as-sub="true" />
             <StyleDropdown :as-sub="true" />
             <ViewDropdown :as-sub="true" />
-            <HelpDropdown :as-sub="true" @open-about="handleOpenAbout" @open-fund="handleOpenFund" />
           </MenubarContent>
         </MenubarMenu>
       </Menubar>
@@ -391,8 +377,6 @@ async function handlePublishToWechat() {
   </header>
 
   <!-- 对话框组件，嵌套菜单无法正常挂载，需要提取层级 -->
-  <AboutDialog :visible="aboutDialogVisible" @close="aboutDialogVisible = false" />
-  <FundDialog :visible="fundDialogVisible" @close="fundDialogVisible = false" />
   <EditorStateDialog :visible="editorStateDialogVisible" @close="editorStateDialogVisible = false" />
   <AIImageGeneratorPanel v-model:open="uiStore.aiImageDialogVisible" />
 </template>

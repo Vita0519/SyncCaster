@@ -38,12 +38,12 @@
                 </div>
               </div>
               
-              <!-- 功能区：导入/导出 + 主题切换 -->
-              <div class="flex items-center gap-1.5">
+              <!-- 功能区：导入/导出 + 帮助 + 主题切换 -->
+              <div class="flex items-center gap-2">
                 <!-- 导入按钮 -->
                 <button
                   @click="handleImport"
-                  class="h-7 px-2.5 rounded-md transition-colors flex items-center gap-1 text-xs font-medium select-none border-none outline-none"
+                  class="h-8 px-3 rounded-md transition-colors flex items-center gap-1.5 text-sm font-medium select-none border-none outline-none"
                   :class="isDark 
                     ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' 
                     : 'bg-gray-100 hover:bg-gray-200 text-gray-700'"
@@ -61,7 +61,7 @@
                   placement="bottom-end"
                 >
                   <button
-                    class="h-7 px-2.5 rounded-md transition-colors flex items-center gap-1 text-xs font-medium select-none border-none outline-none"
+                    class="h-8 px-3 rounded-md transition-colors flex items-center gap-1.5 text-sm font-medium select-none border-none outline-none"
                     :class="isDark 
                       ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' 
                       : 'bg-gray-100 hover:bg-gray-200 text-gray-700'"
@@ -73,10 +73,30 @@
                   </button>
                 </n-dropdown>
                 
+                <!-- 帮助下拉菜单 -->
+                <n-dropdown 
+                  :options="helpOptions" 
+                  @select="handleHelp"
+                  trigger="click"
+                  placement="bottom-end"
+                >
+                  <button
+                    class="h-8 px-3 rounded-md transition-colors flex items-center gap-1.5 text-sm font-medium select-none border-none outline-none"
+                    :class="isDark 
+                      ? 'bg-gray-700 hover:bg-gray-600 text-gray-200' 
+                      : 'bg-gray-100 hover:bg-gray-200 text-gray-700'"
+                    title="帮助"
+                  >
+                    <span>❓</span>
+                    <span>帮助</span>
+                    <span class="text-[10px]">▼</span>
+                  </button>
+                </n-dropdown>
+                
                 <!-- 主题切换 -->
                 <button
                   @click="toggleTheme"
-                  class="w-7 h-7 rounded-md transition-colors flex items-center justify-center text-sm select-none border-none outline-none"
+                  class="w-8 h-8 rounded-md transition-colors flex items-center justify-center text-sm select-none border-none outline-none"
                   :class="isDark 
                     ? 'bg-gray-700 hover:bg-gray-600 text-yellow-300' 
                     : 'bg-gray-100 hover:bg-gray-200 text-gray-700'"
@@ -138,6 +158,48 @@
         style="display: none"
         @change="onFileSelected"
       />
+      
+      <!-- 关于对话框 -->
+      <n-modal v-model:show="showAboutDialog" preset="card" title="关于" style="width: 420px;">
+        <div class="text-center">
+          <div class="w-16 h-16 mx-auto mb-4 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center shadow-lg">
+            <span class="text-white text-2xl">✨</span>
+          </div>
+          <h3 class="text-lg font-bold mb-2">SyncCaster</h3>
+          <p class="text-sm text-gray-500 mb-4">一款高效的内容采集与多平台发布助手</p>
+          <p class="text-xs text-gray-400 mb-4">基于 Doocs MD 编辑器，支持微信公众号排版</p>
+          <div class="flex justify-center gap-3">
+            <n-button size="small" @click="window.open('https://github.com/doocs/md', '_blank')">GitHub 仓库</n-button>
+            <n-button size="small" @click="window.open('https://gitee.com/doocs/md', '_blank')">Gitee 仓库</n-button>
+          </div>
+        </div>
+      </n-modal>
+      
+      <!-- 赞赏对话框 -->
+      <n-modal v-model:show="showSponsorDialog" preset="card" title="赞赏" style="width: 480px;">
+        <div class="text-center">
+          <p class="text-sm text-gray-500 mb-4">若觉得项目不错，可以通过以下方式支持我们～</p>
+          <div class="grid grid-cols-2 gap-4 mb-4">
+            <div class="text-center">
+              <img 
+                src="https://cdn-doocs.oss-cn-shenzhen.aliyuncs.com/gh/doocs/md/images/support1.jpg" 
+                alt="赞赏二维码 1" 
+                class="w-full max-w-[180px] mx-auto rounded-lg"
+              />
+              <p class="text-xs text-gray-400 mt-2">yanglbme</p>
+            </div>
+            <div class="text-center">
+              <img 
+                src="https://cdn-doocs.oss-cn-shenzhen.aliyuncs.com/gh/doocs/md/images/support2.jpg" 
+                alt="赞赏二维码 2" 
+                class="w-full max-w-[180px] mx-auto rounded-lg"
+              />
+              <p class="text-xs text-gray-400 mt-2">yangfong</p>
+            </div>
+          </div>
+          <n-button @click="showSponsorDialog = false">关闭</n-button>
+        </div>
+      </n-modal>
     </n-message-provider>
   </n-config-provider>
 </template>
@@ -206,6 +268,18 @@ const exportOptions: DropdownOption[] = [
   { label: '导出为 PNG 图片', key: 'png', icon: () => h('span', '🖼️') },
 ];
 
+// 帮助选项
+const helpOptions: DropdownOption[] = [
+  { label: '反馈', key: 'feedback', icon: () => h('span', '💬') },
+  { label: '版本历史', key: 'releases', icon: () => h('span', '🏷️') },
+  { label: '关于', key: 'about', icon: () => h('span', '❓') },
+  { label: '赞赏', key: 'sponsor', icon: () => h('span', '❤️') },
+];
+
+// 帮助对话框状态
+const showAboutDialog = ref(false);
+const showSponsorDialog = ref(false);
+
 const components: Record<string, any> = {
   dashboard: DashboardView,
   posts: PostsView,
@@ -255,6 +329,24 @@ function updateRouteFromHash() {
 
 function toggleTheme() {
   isDark.value = !isDark.value;
+}
+
+// 帮助功能处理
+function handleHelp(key: string) {
+  switch (key) {
+    case 'feedback':
+      window.open('https://github.com/doocs/md/issues', '_blank');
+      break;
+    case 'releases':
+      window.open('https://github.com/doocs/md/releases', '_blank');
+      break;
+    case 'about':
+      showAboutDialog.value = true;
+      break;
+    case 'sponsor':
+      showSponsorDialog.value = true;
+      break;
+  }
 }
 
 // 导入功能

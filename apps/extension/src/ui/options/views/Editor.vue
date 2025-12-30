@@ -478,6 +478,8 @@ async function save() {
     const now = Date.now();
     const newId = crypto.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2, 8)}`;
     await db.posts.add({ id: newId, version: 1, title: title.value, summary: body.value.slice(0, 200), canonicalUrl: '', createdAt: now, updatedAt: now, body_md: body.value, tags: [], categories: [], assets: [], meta: {} } as any);
+    // 更新当前文章 ID，避免重复创建
+    id.value = newId;
     window.location.hash = `editor/${newId}`;
     savedTitle.value = title.value;
     savedBody.value = body.value;
