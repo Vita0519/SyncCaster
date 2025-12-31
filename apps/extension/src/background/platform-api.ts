@@ -131,20 +131,23 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
   'segmentfault': {
     url: 'https://segmentfault.com/',
     fallbackUrls: [
-      // 部分 Cookie 可能设置在 /user 路径下；补充这些 URL 可提升 Cookie 检测覆盖率
       'https://segmentfault.com/user/',
       'https://segmentfault.com/user/login',
       'https://segmentfault.com/user/settings',
     ],
-    // 思否可能使用的登录态 Cookie（扩展列表）
+    // 思否可能使用的登录态 Cookie（扩展列表 - 2024 更新）
     sessionCookies: [
       'sf_remember',         // 记住登录
       'sf_token',            // 思否 token
       'sf_session',          // 思否会话
-      'user_id',             // 用户 ID
-      'uid',                 // 用户 ID
-      'auth_token',          // 认证 token
-      'access_token',        // 访问 token
+      'PHPSESSID',           // PHP 会话（思否使用 PHP）
+      'Hm_lvt_',             // 百度统计 Cookie（登录用户才有）
+      'sensorsdata',         // 神策数据 Cookie
+      '_ga',                 // Google Analytics
+      'jwt',                 // JWT token
+      'token',               // 通用 token
+      'session',             // 通用会话
+      'XSRF-TOKEN',          // XSRF 令牌
     ],
   },
   'oschina': {
@@ -2465,8 +2468,9 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     // 思否页面可能同时包含登录入口 DOM（用于未登录渲染/埋点），但只要出现“用户菜单”强标识，就应忽略登录入口的干扰
     const hasLoginButton = hasStrongUserMenuMarker && userId ? false : hasLoginButtonRaw;
 
-    // settings 页：只要能取到当前用户 slug 且出现用户菜单标识，即可推断已登录
-    if (sourceLabel === 'settings' && userId && hasStrongUserMenuMarker) {
+    // settings 页：只要能取到当前用户 slug 即可推断已登录
+    // 原因：settings 页面只有登录用户才能访问，能成功获取 HTML 并提取到 userId 就说明已登录
+    if (sourceLabel === 'settings' && userId) {
       logger.info('segmentfault', '从 settings 页面推断已登录', { userId, nickname, avatar: !!avatar });
       return {
         loggedIn: true,
