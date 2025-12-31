@@ -279,7 +279,7 @@ async function findPlatformTab(platform: string): Promise<chrome.tabs.Tab | null
   return null;
 }
 
-const PROFILE_ENRICH_PLATFORMS = new Set(['wechat', 'tencent-cloud', 'jianshu', 'csdn', '51cto', 'segmentfault']);
+const PROFILE_ENRICH_PLATFORMS = new Set(['wechat', 'tencent-cloud', 'jianshu', 'csdn', '51cto', 'segmentfault', 'oschina']);
 const GENERIC_NICKNAMES: Record<string, string[]> = {
   wechat: ['微信公众号'],
   'tencent-cloud': ['腾讯云用户'],
@@ -361,10 +361,25 @@ export class AccountService {
 
     const profileId = (account.meta as any)?.profileId as string | undefined;
     const needsProfileId =
-      platform === 'jianshu' &&
-      (!profileId || profileId === 'undefined' || profileId.startsWith('jianshu_') || /^\d+$/.test(profileId));
+      (platform === 'jianshu' &&
+        (!profileId || profileId === 'undefined' || profileId.startsWith('jianshu_') || /^\d+$/.test(profileId))) ||
+      (platform === 'segmentfault' &&
+        (!profileId ||
+          profileId === 'undefined' ||
+          /^segmentfault_\d{10,}$/.test(profileId) || // add-account fallback: `${platform}_${Date.now()}`
+          /^\d+$/.test(profileId)));
 
-    const needsNickname = isGenericNickname(platform, account.nickname);
+    const needsNickname =
+      isGenericNickname(platform, account.nickname) ||
+      (platform === 'csdn' &&
+        (() => {
+          const nickname = String(account.nickname || '').trim();
+          if (!nickname) return true;
+          const extracted = extractUserIdFromAccountId(account);
+          const uid = String(profileId || extracted || '').trim();
+          if (!uid) return false;
+          return nickname.toLowerCase() === uid.toLowerCase();
+        })());
     const needsAvatar = !account.avatar;
 
     return needsProfileId || needsNickname || needsAvatar;
@@ -373,6 +388,15 @@ export class AccountService {
   private static getProfileEnrichUrl(account: Account): string {
     const config = PLATFORMS[account.platform];
     if (!config) return '';
+
+    if (account.platform === 'csdn') {
+      const uid = String((account.meta as any)?.profileId || extractUserIdFromAccountId(account) || '').trim();
+      // 优先打开博客个人主页，可稳定提取昵称（避免把 userId 当昵称）
+      if (uid && uid !== 'undefined' && !uid.startsWith('csdn_') && !/^\d{10,}$/.test(uid)) {
+        return `https://blog.csdn.net/${encodeURIComponent(uid)}?type=blog`;
+      }
+      return config.homeUrl;
+    }
 
     if (account.platform === '51cto') {
       const uid = String((account.meta as any)?.profileId || extractUserIdFromAccountId(account) || '').trim();
@@ -397,6 +421,14 @@ export class AccountService {
         return `https://segmentfault.com/u/${slug}`;
       }
       return config.homeUrl;
+    }
+
+    if (account.platform === 'oschina') {
+      const uid = String((account.meta as any)?.profileId || extractUserIdFromAccountId(account) || '').trim();
+      if (uid && /^\d+$/.test(uid)) {
+        return `https://my.oschina.net/u/${uid}`;
+      }
+      return 'https://my.oschina.net/';
     }
 
     return config.homeUrl;
@@ -676,14 +708,28 @@ export class AccountService {
           
           // 优先使用直接 API 检测（更快，不依赖页面加载状态）
           if (useDirectApi) {
-            const userInfo = await fetchPlatformUserInfo(platform);
-            if (userInfo.loggedIn) {
-              loggedIn = true;
-              userId = userInfo.userId;
-              nickname = userInfo.nickname;
-              avatar = userInfo.avatar;
-              meta = userInfo.meta;
-              logger.info('add-account', 'API 检测到登录成功', { userId, nickname });
+            if (tabId && ['segmentfault', 'oschina', 'csdn'].includes(platform)) {
+              const state = await checkLoginInTab(tabId);
+              if (state.loggedIn) {
+                loggedIn = true;
+                userId = state.userId;
+                nickname = state.nickname;
+                avatar = state.avatar;
+                meta = state.meta;
+                logger.info('add-account', 'Tab 检测到登录成功', { userId, nickname });
+              }
+            }
+
+            if (!loggedIn) {
+              const userInfo = await fetchPlatformUserInfo(platform);
+              if (userInfo.loggedIn) {
+                loggedIn = true;
+                userId = userInfo.userId;
+                nickname = userInfo.nickname;
+                avatar = userInfo.avatar;
+                meta = userInfo.meta;
+                logger.info('add-account', 'API 检测到登录成功', { userId, nickname });
+              }
             }
           } else {
             // 回退：使用 content script 检测
@@ -1146,7 +1192,8 @@ export class AccountService {
           };
           
           await db.accounts.put(updated);
-          success.push(updated);
+          const enriched = await this.maybeEnrichAccountProfile(updated);
+          success.push(enriched);
         } else {
           // 检测失败：根据错误类型决定状态
           const isRetryable = userInfo.retryable === true && userInfo.errorType !== AuthErrorType.LOGGED_OUT;

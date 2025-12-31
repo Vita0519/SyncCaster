@@ -269,6 +269,9 @@ function goToUserProfile(account: Account) {
   if (userId === 'undefined' || userId === '' || /^\d{10,}$/.test(userId || '')) {
     userId = undefined;
   }
+  if (account.platform === 'segmentfault' && userId && /^segmentfault_\d{10,}$/.test(userId)) {
+    userId = undefined;
+  }
   if (!userId) {
     const profileId = (account.meta as any)?.profileId;
     if (typeof profileId === 'string' && profileId.trim()) {
@@ -294,7 +297,10 @@ function goToUserProfile(account: Account) {
     }
   }
   if (account.platform === 'segmentfault' && userId) {
-    const isSlug = /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(userId) && !/^\d+$/.test(userId);
+    const isSlug =
+      /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(userId) &&
+      !/^\d+$/.test(userId) &&
+      !/^segmentfault_\d{10,}$/.test(userId);
     if (!isSlug) userId = undefined;
   }
   if (!userId && account.platform === 'segmentfault') {

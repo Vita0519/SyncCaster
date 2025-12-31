@@ -272,8 +272,23 @@ const juejinDetector: PlatformAuthDetector = {
         if ((data?.code === 200 || data?.code === '200') && payload) {
           const user = payload;
           const userId = user.username || user.userName || user.user_name;
-          const nickname = user.nickname || user.nickName || user.name || userId;
-          const avatar = user.avatar || user.avatarUrl || user.headUrl;
+          let nickname = user.nickname || user.nickName || user.name || userId;
+          let avatar = user.avatar || user.avatarUrl || user.headUrl;
+
+          const trimmedNickname = (nickname || '').trim();
+          const trimmedUserId = (userId || '').trim();
+          const suspectNickname =
+            !trimmedNickname ||
+            (trimmedUserId && trimmedNickname.toLowerCase() === trimmedUserId.toLowerCase()) ||
+            /^csdn_\d+$/i.test(trimmedNickname);
+
+          if (suspectNickname) {
+            const domNickname = getReliableNicknameFromDom();
+            const domAvatar = getReliableAvatarFromDom();
+            const bg = await fetchPlatformInfoFromBackground('csdn');
+            nickname = domNickname || bg?.nickname || nickname;
+            avatar = avatar || domAvatar || bg?.avatar;
+          }
           log('csdn', '从 API 获取到用户信息', { nickname });
           return {
             loggedIn: true,
@@ -416,13 +431,113 @@ const wechatDetector: PlatformAuthDetector = {
     const url = window.location.href;
     
     // 检查是否在登录页面
-    if (url.includes('/cgi-bin/loginpage') || url.includes('action=scanlogin') || 
-        url.includes('/cgi-bin/bizlogin') || url === 'https://mp.weixin.qq.com/' ||
-        url === 'https://mp.weixin.qq.com') {
+    if (url.includes('/cgi-bin/loginpage') || url.includes('action=scanlogin') || url.includes('/cgi-bin/bizlogin')) {
       if (!url.includes('token=')) {
-        return { loggedIn: false, platform: 'wechat' };
+        const loginFormSelectors = ['.login__type__container', '.login_frame', '.weui-desktop-login'];
+        for (const selector of loginFormSelectors) {
+          if (document.querySelector(selector)) {
+            return { loggedIn: false, platform: 'wechat' };
+          }
+        }
       }
     }
+
+    const normalizeUrl = (value?: string): string | undefined => {
+      if (!value) return undefined;
+      const trimmed = value.trim();
+      if (!trimmed) return undefined;
+      if (trimmed.startsWith('//')) return `https:${trimmed}`;
+      if (trimmed.startsWith('/')) return `https://mp.weixin.qq.com${trimmed}`;
+      return trimmed;
+    };
+
+    const decodeJsonString = (value: string): string => {
+      try {
+        return JSON.parse(`"${value.replace(/"/g, '\\"')}"`);
+      } catch {
+        return value;
+      }
+    };
+
+    const extractFromGlobals = (): { nickname?: string; avatar?: string } => {
+      const win = window as any;
+      const sources = [
+        win.cgiData,
+        win.wx?.cgiData,
+        win.wx_common_data,
+        win.__wxCommonData__,
+        win.__INITIAL_STATE__,
+        win.__NUXT__,
+      ].filter(Boolean);
+
+      const pickFromObj = (obj: any): { nickname?: string; avatar?: string } | null => {
+        if (!obj || typeof obj !== 'object') return null;
+        const nickname =
+          obj.nickname ||
+          obj.nick_name ||
+          obj.nickName ||
+          obj.name ||
+          obj.account_name ||
+          obj.accountName ||
+          obj.user_name ||
+          obj.username ||
+          obj.userName;
+        const avatar =
+          obj.avatar ||
+          obj.head_img ||
+          obj.headimgurl ||
+          obj.headImgUrl ||
+          obj.head_img_url ||
+          obj.headimg_url ||
+          obj.headimg ||
+          obj.logo ||
+          obj.headImageUrl ||
+          obj.head_image_url;
+
+        const nicknameStr = typeof nickname === 'string' ? nickname.trim() : undefined;
+        const avatarStr = typeof avatar === 'string' ? normalizeUrl(avatar) : undefined;
+        if (nicknameStr || avatarStr) return { nickname: nicknameStr, avatar: avatarStr };
+        return null;
+      };
+
+      for (const source of sources) {
+        const candidates = [
+          source,
+          source.user,
+          source.user_info,
+          source.userInfo,
+          source.account,
+          source.profile,
+          source.data?.user,
+          source.data?.user_info,
+          source.data?.account,
+        ];
+        for (const candidate of candidates) {
+          const picked = pickFromObj(candidate);
+          if (picked) return picked;
+        }
+      }
+
+      return {};
+    };
+
+    const extractFromScripts = (): { nickname?: string; avatar?: string } => {
+      const scripts = Array.from(document.querySelectorAll('script'));
+      for (const script of scripts) {
+        const text = script.textContent;
+        if (!text) continue;
+        if (!/(nick_name|nickname|head_img|headimgurl|head_img_url|headimg_url)/.test(text)) continue;
+
+        const nicknameMatch = text.match(/["'](?:nick_name|nickname)["']\s*:\s*["']([^"']+)["']/);
+        const avatarMatch = text.match(/["'](?:head_img|headimgurl|head_img_url|headimg_url|avatar)["']\s*:\s*["']([^"']+)["']/);
+
+        const nickname = nicknameMatch?.[1] ? decodeJsonString(nicknameMatch[1]).trim() : undefined;
+        const avatar = avatarMatch?.[1] ? normalizeUrl(decodeJsonString(avatarMatch[1])) : undefined;
+
+        if (nickname || avatar) return { nickname, avatar };
+      }
+      return {};
+    };
 
     const getNicknameFromDom = () =>
       readTextFromEl(document.querySelector('.weui-desktop-person-info .weui-desktop-name')) ||
@@ -431,12 +546,19 @@ const wechatDetector: PlatformAuthDetector = {
       readTextFromEl(document.querySelector('.weui-desktop-account__name')) ||
       readTextFromEl(document.querySelector('.weui-desktop-account__nickname')) ||
       readTextFromEl(document.querySelector('.weui-desktop-account__info .weui-desktop-account__name')) ||
-      readTextFromEl(document.querySelector('[class*="account"][class*="name"]'));
+      readTextFromEl(document.querySelector('#js_account_info .weui-desktop-account__name')) ||
+      readTextFromEl(document.querySelector('#js_account_info .weui-desktop-account__nickname')) ||
+      readTextFromEl(document.querySelector('#js_account_nickname')) ||
+      readTextFromEl(document.querySelector('[class*="account"][class*="name"]')) ||
+      readTextFromEl(document.querySelector('[class*="account"][class*="nickname"]'));
     const getAvatarFromDom = () =>
-      readAvatarUrlFromEl(document.querySelector('img.weui-desktop-account__img')) ||
-      readAvatarUrlFromEl(document.querySelector('.weui-desktop-account__avatar img')) ||
-      readAvatarUrlFromEl(document.querySelector('[class*="avatar"] img')) ||
-      undefined;
+      normalizeUrl(
+        readAvatarUrlFromEl(document.querySelector('img.weui-desktop-account__img')) ||
+          readAvatarUrlFromEl(document.querySelector('.weui-desktop-account__avatar img')) ||
+          readAvatarUrlFromEl(document.querySelector('#js_account_info img')) ||
+          readAvatarUrlFromEl(document.querySelector('[class*="account"] img')) ||
+          readAvatarUrlFromEl(document.querySelector('[class*="avatar"] img'))
+      ) || undefined;
     
     // 检查 URL 中的 token 参数
     const tokenMatch = url.match(/token=(\d+)/);
@@ -445,8 +567,10 @@ const wechatDetector: PlatformAuthDetector = {
 
       const nicknameFromDom = await waitForValue(() => getNicknameFromDom());
       const avatarFromDom = await waitForValue(() => getAvatarFromDom(), { timeoutMs: 1200 });
+      const fromGlobals = extractFromGlobals();
+      const fromScripts = extractFromScripts();
       
-      let nickname = nicknameFromDom || '微信公众号';
+      let nickname = nicknameFromDom || fromGlobals.nickname || fromScripts.nickname || '微信公众号';
       // 尝试从页面标题获取昵称
       const title = document.title;
       if (title && !title.includes('登录')) {
@@ -460,7 +584,7 @@ const wechatDetector: PlatformAuthDetector = {
         loggedIn: true,
         platform: 'wechat',
         nickname: nickname,
-        avatar: avatarFromDom,
+        avatar: avatarFromDom || fromGlobals.avatar || fromScripts.avatar,
       };
     }
     
@@ -470,6 +594,8 @@ const wechatDetector: PlatformAuthDetector = {
       if (cookies.includes('slave_sid=') || cookies.includes('data_ticket=') || cookies.includes('bizuin=')) {
         const nicknameFromDom = await waitForValue(() => getNicknameFromDom(), { timeoutMs: 1200 });
         const avatarFromDom = await waitForValue(() => getAvatarFromDom(), { timeoutMs: 1200 });
+        const fromGlobals = extractFromGlobals();
+        const fromScripts = extractFromScripts();
 
         // 兜底：让 background 尝试从 Cookie 结构化字段中解析昵称/头像
         const bg = await fetchPlatformInfoFromBackground('wechat');
@@ -478,19 +604,11 @@ const wechatDetector: PlatformAuthDetector = {
         return {
           loggedIn: true,
           platform: 'wechat',
-          nickname: nicknameFromDom || bgNickname || '微信公众号',
-          avatar: avatarFromDom || bgAvatar,
+          nickname: nicknameFromDom || fromGlobals.nickname || fromScripts.nickname || bgNickname || '微信公众号',
+          avatar: avatarFromDom || fromGlobals.avatar || fromScripts.avatar || bgAvatar,
         };
       }
     } catch {}
-    
-    // 检查登录表单
-    const loginFormSelectors = ['.login__type__container', '.login_frame', '.weui-desktop-login'];
-    for (const selector of loginFormSelectors) {
-      if (document.querySelector(selector)) {
-        return { loggedIn: false, platform: 'wechat' };
-      }
-    }
     
     return { loggedIn: false, platform: 'wechat' };
   },
@@ -613,6 +731,21 @@ const cnblogsDetector: PlatformAuthDetector = {
   async checkLogin(): Promise<LoginState> {
     log('cnblogs', '检测登录状态...');
     const url = window.location.href;
+
+    const normalizeUrl = (value?: unknown, base = 'https://www.cnblogs.com'): string | undefined => {
+      const candidate =
+        typeof value === 'string'
+          ? value
+          : value && typeof value === 'object'
+            ? (value as any).url || (value as any).src || (value as any).href
+            : undefined;
+      if (typeof candidate !== 'string') return undefined;
+      const trimmed = candidate.trim();
+      if (!trimmed || trimmed === '[object Object]') return undefined;
+      if (trimmed.startsWith('//')) return `https:${trimmed}`;
+      if (trimmed.startsWith('/')) return `${base}${trimmed}`;
+      return trimmed;
+    };
     
     // 检查是否在"您已登录"页面 - 此时需要尝试获取用户信息
     if (url.includes('continue-sign-out') || url.includes('already-signed-in')) {
@@ -632,7 +765,7 @@ const cnblogsDetector: PlatformAuthDetector = {
               // 使用 blogApp 作为 userId，因为主页 URL 格式为 /u/{blogApp}
               userId: data.blogApp || data.userId,
               nickname: data.displayName || data.blogApp,
-              avatar: data.avatar,
+              avatar: normalizeUrl(data.avatar || data.avatarUrl || data.avatar_url || data.Avatar || data.AvatarUrl),
             };
           }
         }
@@ -663,7 +796,7 @@ const cnblogsDetector: PlatformAuthDetector = {
             // 使用 blogApp 作为 userId，因为主页 URL 格式为 /u/{blogApp}
             userId: data.blogApp || data.userId,
             nickname: data.displayName || data.blogApp,
-            avatar: data.avatar,
+            avatar: normalizeUrl(data.avatar || data.avatarUrl || data.avatar_url || data.Avatar || data.AvatarUrl),
           };
         }
       }
@@ -1213,6 +1346,12 @@ const segmentfaultDetector: PlatformAuthDetector = {
         for (const selector of dropdownSelectors) {
           const dropdowns = headerEl.querySelectorAll(selector);
           for (const dropdown of dropdowns) {
+            // 只在“当前登录用户菜单”区域提取，避免误抓推荐/列表/评论区的用户链接
+            const hasUserMenuMarker = !!dropdown.querySelector(
+              'a[href*="/user/settings"], a[href*="/user/logout"], a[href*="logout"], a[href*="settings"]'
+            );
+            if (!hasUserMenuMarker) continue;
+
             // 检查是否是用户相关的下拉菜单（包含用户链接）
             const userLinks = dropdown.querySelectorAll('a[href*="/u/"]') as NodeListOf<HTMLAnchorElement>;
             
@@ -1332,12 +1471,13 @@ const segmentfaultDetector: PlatformAuthDetector = {
         
         // 尝试从不同路径获取用户信息
         const userPaths = [
-          source.user,
           source.currentUser,
           source.auth?.user,
+          source.auth?.currentUser,
+          source.global?.currentUser,
           source.global?.user,
-          source.data?.user,
-          source.state?.user,
+          source.state?.auth?.user,
+          source.state?.currentUser,
         ];
         
         for (const user of userPaths) {
@@ -1368,31 +1508,323 @@ const segmentfaultDetector: PlatformAuthDetector = {
       
       return null;
     };
+
+    const fetchSegmentfaultProfileBySlug = async (
+      userId: string
+    ): Promise<{ nickname?: string; avatar?: string } | null> => {
+      const slug = userId.trim();
+      if (!slug || !isSegmentfaultSlugLike(slug)) return null;
+
+      const normalizeProfileUrl = (value?: string): string | undefined => {
+        if (!value) return undefined;
+        const trimmed = value.trim();
+        if (!trimmed) return undefined;
+        if (trimmed.startsWith('//')) return `https:${trimmed}`;
+        if (trimmed.startsWith('/')) return `https://segmentfault.com${trimmed}`;
+        return trimmed;
+      };
+
+      try {
+        const res = await fetch(`https://segmentfault.com/u/${slug}`, {
+          credentials: 'include',
+          headers: { 'Accept': 'text/html,application/xhtml+xml' },
+        });
+
+        if (!res.ok) return null;
+        const html = await res.text();
+        const scope = (() => {
+          const idx = html.search(/class=["'][^"']*userinfo[^"']*["']/i);
+          if (idx >= 0) {
+            return html.substring(Math.max(0, idx - 4000), Math.min(html.length, idx + 12000));
+          }
+          return html.substring(0, 60000);
+        })();
+
+        let nickname: string | undefined;
+        const namePatterns = [
+          /<h3[^>]*class=["'][^"']*text-center[^"']*["'][^>]*>([^<]+)<\/h3>/i,
+          /<div[^>]*class=["'][^"']*userinfo[^"']*["'][^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i,
+          /<div[^>]*class=["'][^"']*card-body[^"']*["'][^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i,
+          /<title>([^<\-]+)\s*[-–—]/i,
+        ];
+
+        for (const pattern of namePatterns) {
+          const match = scope.match(pattern) || html.match(pattern);
+          const value = match?.[1]?.trim();
+          if (value && value.length < 50 && !isSegmentfaultSlugLike(value)) {
+            nickname = value;
+            break;
+          }
+        }
+
+        let avatar: string | undefined;
+        const avatarPatterns = [
+          /<img[^>]+class=["'][^"']*avatar[^"']*["'][^>]+src=["']([^"']+)["']/i,
+          /<img[^>]+src=["']([^"']+cdn\.segmentfault[^"']+)["']/i,
+          /<img[^>]+src=["']([^"']+avatar[^"']+)["']/i,
+        ];
+
+        for (const pattern of avatarPatterns) {
+          const match = scope.match(pattern) || html.match(pattern);
+          const value = normalizeProfileUrl(match?.[1]);
+          if (!value) continue;
+          if (/default|placeholder/i.test(value)) continue;
+          avatar = value;
+          break;
+        }
+
+        if (!nickname && !avatar) return null;
+        return { nickname, avatar };
+      } catch {
+        return null;
+      }
+    };
     
-    // 1. 首先尝试从全局变量获取用户信息
-    const globalUser = extractUserFromGlobal();
-    if (globalUser && globalUser.nickname && globalUser.nickname.trim()) {
+    const extractCurrentUserFromUserMenu = async (): Promise<{
+      nickname?: string;
+      avatar?: string;
+      userId?: string;
+    } | null> => {
+      const normalizeSlugFromHref = (href: string): string | undefined => {
+        const match = href.match(/\/u\/([^\/\?#]+)/);
+        const candidate = (match?.[1] || '').trim();
+        return candidate && isSegmentfaultSlugLike(candidate) ? candidate : undefined;
+      };
+
+      const excludedTexts = [
+        '我的',
+        '设置',
+        '退出',
+        '登录',
+        '登出',
+        'logout',
+        'settings',
+        'profile',
+        '个人中心',
+        '写文章',
+        '提问',
+        '我的主页',
+        '消息',
+        '收藏',
+        '关注',
+      ];
+
+      const isValidLabel = (text?: string): boolean => {
+        if (!text) return false;
+        const trimmed = text.trim();
+        if (!trimmed || trimmed.length >= 50) return false;
+        if (/^\d+$/.test(trimmed)) return false;
+        if (excludedTexts.some((excluded) => trimmed === excluded || trimmed.toLowerCase() === excluded.toLowerCase())) {
+          return false;
+        }
+        return true;
+      };
+
+      const isElementVisible = (el: Element): boolean => {
+        const rect = (el as HTMLElement).getBoundingClientRect?.();
+        if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+        const style = window.getComputedStyle(el as Element);
+        if (!style) return true;
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        if (style.opacity === '0') return false;
+        return true;
+      };
+
+      const pickAvatarFromImg = (img?: HTMLImageElement | null): string | undefined => {
+        const src = img?.src?.trim();
+        if (!src) return undefined;
+        if (src.includes('default') || src.includes('placeholder')) return undefined;
+        return src;
+      };
+
+      const pickAvatarFromContainer = (container?: Element | null): string | undefined => {
+        if (!container) return undefined;
+        const imgs = Array.from(container.querySelectorAll('img')) as HTMLImageElement[];
+        for (const img of imgs) {
+          const src = img.src?.trim();
+          if (!src) continue;
+          if (src.includes('default') || src.includes('placeholder')) continue;
+          const cls = (img.className || '').toString().toLowerCase();
+          if (cls.includes('avatar') || src.includes('avatar') || src.includes('cdn.segmentfault')) {
+            return src;
+          }
+        }
+        return pickAvatarFromImg(imgs[0]);
+      };
+
+      const header = (document.querySelector('#sf-header') ||
+        document.querySelector('header, .navbar, nav, [class*="header"]')) as HTMLElement | null;
+      if (!header) return null;
+
+      const candidateImgs = Array.from(header.querySelectorAll('img')) as HTMLImageElement[];
+      const headerAvatarImg = candidateImgs
+        .filter((img) => {
+          const src = img.src || '';
+          const cls = (img.className || '').toString().toLowerCase();
+          const alt = (img.getAttribute('alt') || '').toLowerCase();
+          if (!src) return false;
+          if (!isElementVisible(img)) return false;
+          if (src.includes('default') || src.includes('placeholder')) return false;
+          return cls.includes('avatar') || src.includes('avatar') || src.includes('cdn.segmentfault') || alt.includes('avatar');
+        })
+        .sort((a, b) => {
+          const ar = a.getBoundingClientRect();
+          const br = b.getBoundingClientRect();
+          return br.right - ar.right;
+        })[0];
+
+      const trigger =
+        (headerAvatarImg?.closest('a, button, [role="button"], [class*="nav-user"], [class*="user"], [class*="dropdown"]') ||
+          header.querySelector('.nav-user-dropdown, .user-dropdown, [class*="nav-user"], [class*="user-dropdown"], [class*="user-menu"]')) as
+          | HTMLElement
+          | null;
+
+      const triggerAvatar = pickAvatarFromImg(headerAvatarImg);
+
+      const hasUserMenuMarkers = (menu: Element): boolean => {
+        return (
+          !!menu.querySelector('a[href*="/user/settings"], a[href*="/user/logout"], a[href*="logout"], a[href*="settings"]') ||
+          /logout|settings|退出|设置/i.test(menu.textContent || '')
+        );
+      };
+
+      const findMenu = (): Element | null => {
+        const menus = Array.from(
+          document.querySelectorAll(
+            '[role="menu"], .dropdown-menu, .nav-user-dropdown, .user-dropdown, [class*="user-menu"], [class*="popover"]'
+          )
+        ) as HTMLElement[];
+
+        const candidates = menus
+          .filter((menu) => isElementVisible(menu) && hasUserMenuMarkers(menu))
+          .map((menu) => {
+            const rect = menu.getBoundingClientRect();
+            const triggerRect = trigger?.getBoundingClientRect?.();
+            const score = triggerRect
+              ? Math.abs(rect.top - triggerRect.bottom) + Math.abs(rect.left - triggerRect.left)
+              : rect.top;
+            return { menu, score };
+          })
+          .sort((a, b) => a.score - b.score);
+
+        return candidates[0]?.menu || null;
+      };
+
+      if (trigger) {
+        try {
+          trigger.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+          trigger.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true }));
+          trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        } catch {}
+      }
+
+      const menu = await waitForValue(() => findMenu(), { timeoutMs: 1200 });
+      if (!menu) return triggerAvatar ? { avatar: triggerAvatar } : null;
+
+      const links = Array.from(
+        menu.querySelectorAll('a[href^="/u/"], a[href^="https://segmentfault.com/u/"]')
+      ) as HTMLAnchorElement[];
+      let profileLink: HTMLAnchorElement | undefined;
+      let fallbackLink: HTMLAnchorElement | undefined;
+
+      for (const link of links) {
+        const href = link.getAttribute('href') || link.href || '';
+        const userId = normalizeSlugFromHref(href);
+        if (!userId) continue;
+        if (!fallbackLink) fallbackLink = link;
+        const text = link.textContent?.trim();
+        if (isValidLabel(text)) {
+          profileLink = link;
+          break;
+        }
+      }
+
+      profileLink = profileLink || fallbackLink;
+      if (!profileLink) return triggerAvatar ? { avatar: triggerAvatar } : null;
+
+      const userId = normalizeSlugFromHref(profileLink.getAttribute('href') || profileLink.href || '');
+      if (!userId) return triggerAvatar ? { avatar: triggerAvatar } : null;
+
+      const card = profileLink.closest('a, li, div') || profileLink;
+      let nickname = isValidLabel(profileLink.textContent) ? profileLink.textContent!.trim() : undefined;
+      if (!nickname) {
+        const preferredSelectors = ['[class*="nickname"]', '[class*="user-name"]', '[class*="username"]'];
+        for (const selector of preferredSelectors) {
+          const el = card.querySelector(selector) || menu.querySelector(selector);
+          const text = el?.textContent?.trim();
+          if (isValidLabel(text)) {
+            nickname = text;
+            break;
+          }
+        }
+      }
+      if (!nickname) {
+        const nodes = Array.from(card.querySelectorAll('a, span, div')) as HTMLElement[];
+        for (const node of nodes) {
+          const text = node.textContent?.trim();
+          if (isValidLabel(text)) {
+            nickname = text;
+            break;
+          }
+        }
+      }
+
+      const avatar = pickAvatarFromContainer(card) || pickAvatarFromContainer(menu) || triggerAvatar;
+
       return {
+        userId,
+        nickname,
+        avatar,
+      };
+    };
+
+    const menuUser = await extractCurrentUserFromUserMenu();
+    let menuResolved: LoginState | null = null;
+
+    if (menuUser?.userId) {
+      let nickname = menuUser.nickname;
+      let avatar = menuUser.avatar;
+
+      if (!nickname || !avatar) {
+        const profile = await fetchSegmentfaultProfileBySlug(menuUser.userId);
+        if (!nickname && profile?.nickname) nickname = profile.nickname;
+        if (!avatar && profile?.avatar) avatar = profile.avatar;
+      }
+
+      menuResolved = {
         loggedIn: true,
         platform: 'segmentfault',
-        userId: globalUser.userId,
-        nickname: globalUser.nickname || '思否用户',
-        avatar: globalUser.avatar,
+        userId: menuUser.userId,
+        nickname,
+        avatar,
       };
+
+      if (nickname && avatar) {
+        return {
+          ...menuResolved,
+          nickname: nickname || '思否用户',
+        };
+      }
     }
-    
-    // 2. 尝试 API（多个可能的接口）
+
+    // 1. 尝试 API（多个可能的接口）
     const apiEndpoints = [
       'https://segmentfault.com/api/users/-/info',
       'https://segmentfault.com/api/user/info',
       'https://segmentfault.com/api/user/-/info',
+      'https://segmentfault.com/gateway/user/-/info',
     ];
+
+    let apiUser: LoginState | null = null;
     
     for (const endpoint of apiEndpoints) {
       try {
         const res = await fetch(endpoint, {
           credentials: 'include',
-          headers: { 'Accept': 'application/json' },
+          headers: {
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+          },
         });
         if (res.ok) {
           const text = await res.text();
@@ -1418,7 +1850,7 @@ const segmentfaultDetector: PlatformAuthDetector = {
                 (!isSegmentfaultSlugLike(nameField) ? nameField : '') ||
                 '';
               log('segmentfault', '从 API 获取到用户信息', { endpoint, nickname: displayName, slug: user.name });
-              return {
+              apiUser = {
                 loggedIn: true,
                 platform: 'segmentfault',
                 userId:
@@ -1434,15 +1866,57 @@ const segmentfaultDetector: PlatformAuthDetector = {
                   articlesCount: user.articles || user.article_count,
                 },
               };
+              break;
             }
           } catch {}
         }
       } catch (e) {
         log('segmentfault', `API ${endpoint} 调用失败`, e);
       }
+
+      if (apiUser) break;
+    }
+
+    // 2. 优先使用“右上角当前登录用户头像菜单”提取的 userId/昵称/头像，避免误抓页面其他用户信息
+    if (menuResolved) {
+      const mergedNickname =
+        menuResolved.nickname ||
+        (apiUser?.userId === menuResolved.userId ? apiUser.nickname : undefined) ||
+        '思否用户';
+      const mergedAvatar = menuResolved.avatar || (apiUser?.userId === menuResolved.userId ? apiUser.avatar : undefined);
+
+      return {
+        ...menuResolved,
+        nickname: mergedNickname,
+        avatar: mergedAvatar,
+        meta: apiUser?.meta,
+      };
+    }
+
+    if (apiUser) return apiUser;
+
+    if (menuUser && (menuUser.nickname || menuUser.avatar)) {
+      return {
+        loggedIn: true,
+        platform: 'segmentfault',
+        nickname: menuUser.nickname || '思否用户',
+        avatar: menuUser.avatar,
+      };
     }
     
-    // 3. 从 DOM 中提取用户信息
+    // 3. Prefer global currentUser state before generic DOM parsing.
+    const globalUser = extractUserFromGlobal();
+    if (globalUser && globalUser.userId) {
+      return {
+        loggedIn: true,
+        platform: 'segmentfault',
+        userId: globalUser.userId,
+        nickname: globalUser.nickname || '思否用户',
+        avatar: globalUser.avatar,
+      };
+    }
+
+    // 4. 从 DOM 中提取用户信息
     const domUser = extractUserFromDom();
     if (domUser.avatar || domUser.nickname || domUser.userId) {
       log('segmentfault', '从 DOM 获取到用户信息', domUser);
@@ -1452,18 +1926,6 @@ const segmentfaultDetector: PlatformAuthDetector = {
         userId: domUser.userId,
         nickname: domUser.nickname || '思否用户',
         avatar: domUser.avatar,
-      };
-    }
-    
-    // 4. 检查页面中是否有退出/设置按钮（登录后才有）
-    // If global state indicates logged-in but we couldn't extract a visible nickname, fall back to it.
-    if (globalUser && globalUser.userId) {
-      return {
-        loggedIn: true,
-        platform: 'segmentfault',
-        userId: globalUser.userId,
-        nickname: globalUser.nickname || '思否用户',
-        avatar: globalUser.avatar,
       };
     }
 
@@ -1628,6 +2090,65 @@ const oschinaDetector: PlatformAuthDetector = {
         if (excludedTexts.some(excluded => trimmed === excluded || trimmed.toLowerCase() === excluded.toLowerCase())) return false;
         return true;
       };
+
+      const sidebarScope =
+        document.querySelector('#userSidebar') ||
+        document.querySelector('.sidebar-section.user-info') ||
+        document.querySelector('.space-sidebar') ||
+        document.querySelector('.user-text');
+
+      if (sidebarScope) {
+        const scope = sidebarScope.closest('.sidebar-section.user-info') || sidebarScope;
+        const profileLink = scope.querySelector('a[href*="my.oschina.net/u/"]') as HTMLAnchorElement | null;
+        const href = profileLink?.getAttribute('href') || profileLink?.href || '';
+        const match = href.match(/\/u\/(\d+)/);
+        if (match?.[1]) {
+          userId = match[1];
+        }
+
+        const nicknameCandidates = [
+          scope.querySelector('.user-name .name'),
+          scope.querySelector('.user-name'),
+          scope.querySelector('.user-name__inner'),
+          scope.querySelector('span.name'),
+          scope.querySelector('span[class*="name"]'),
+        ];
+
+        for (const node of nicknameCandidates) {
+          const text = readTextFromEl(node);
+          if (isValidNickname(text)) {
+            nickname = text!.trim();
+            break;
+          }
+        }
+
+        if (!nickname && profileLink) {
+          const linkText = profileLink.textContent?.trim();
+          if (isValidNickname(linkText)) {
+            nickname = linkText;
+          }
+        }
+
+        const avatarContainer = scope.querySelector('.avatar-wrap') || scope.querySelector('img');
+        const rawAvatar = readAvatarUrlFromEl(avatarContainer);
+        const normalizedAvatar = normalizeUrl(rawAvatar, 'https://my.oschina.net') || normalizeUrl(rawAvatar);
+        if (
+          normalizedAvatar &&
+          !normalizedAvatar.includes('logo') &&
+          !normalizedAvatar.includes('icon') &&
+          !normalizedAvatar.includes('favicon') &&
+          !normalizedAvatar.includes('sprite') &&
+          !normalizedAvatar.includes('loading') &&
+          !normalizedAvatar.includes('placeholder') &&
+          !normalizedAvatar.includes('default')
+        ) {
+          avatar = normalizedAvatar;
+        }
+
+        if (userId || nickname || avatar) {
+          return { nickname, avatar, userId };
+        }
+      }
       
       // 1. 尝试从导航栏用户区域提取（最可靠）
       // 开源中国的用户下拉菜单通常在页面顶部
@@ -1752,6 +2273,44 @@ const oschinaDetector: PlatformAuthDetector = {
       
       return { nickname, avatar, userId };
     };
+
+    const reconcileWithBackground = async (local: LoginState): Promise<LoginState> => {
+      try {
+        const bg = await fetchPlatformInfoFromBackground('oschina');
+        if (bg?.loggedIn) {
+          const mergedUserId = bg.userId || local.userId;
+          const mergedNickname = bg.nickname || local.nickname || '开源中国用户';
+          const mergedAvatar = bg.avatar || local.avatar;
+
+          // 如果本地从页面提取到的是“正在浏览的他人主页”，而 background 基于 Cookie 得到的是当前登录用户，则以 background 为准
+          if (bg.userId && local.userId && bg.userId !== local.userId) {
+            return {
+              loggedIn: true,
+              platform: 'oschina',
+              userId: bg.userId,
+              nickname: mergedNickname,
+              avatar: mergedAvatar,
+              meta: bg.meta || local.meta,
+            };
+          }
+
+          return {
+            loggedIn: true,
+            platform: 'oschina',
+            userId: mergedUserId,
+            nickname: mergedNickname,
+            avatar: mergedAvatar,
+            meta: { ...(local.meta || {}), ...(bg.meta || {}) },
+          };
+        }
+      } catch {}
+
+      return {
+        ...local,
+        platform: 'oschina',
+        nickname: local.nickname || '开源中国用户',
+      };
+    };
     
     // 1. 检查是否在登录页面
     if (url.includes('/home/login') || url.includes('/login')) {
@@ -1759,13 +2318,13 @@ const oschinaDetector: PlatformAuthDetector = {
       const domUser = extractUserFromDom();
       if (domUser.userId || domUser.nickname) {
         log('oschina', '在登录页但检测到用户信息，可能已登录', domUser);
-        return {
+        return await reconcileWithBackground({
           loggedIn: true,
           platform: 'oschina',
           userId: domUser.userId,
           nickname: domUser.nickname || '开源中国用户',
           avatar: domUser.avatar,
-        };
+        });
       }
       log('oschina', '在登录页面，未检测到登录状态');
       return { loggedIn: false, platform: 'oschina' };
@@ -1777,13 +2336,13 @@ const oschinaDetector: PlatformAuthDetector = {
       log('oschina', '从全局变量 G_USER 获取到用户信息', { id: win.G_USER.id, name: win.G_USER.name, account: win.G_USER.account });
       // 开源中国用户名可能在 account、name、nick、nickname 等字段
       const nickname = win.G_USER.account || win.G_USER.nick || win.G_USER.nickname || win.G_USER.name || win.G_USER.userName || win.G_USER.user_name;
-      return {
+      return await reconcileWithBackground({
         loggedIn: true,
         platform: 'oschina',
         userId: String(win.G_USER.id),
         nickname: nickname || '开源中国用户',
         avatar: normalizeUrl(win.G_USER.portrait || win.G_USER.avatar || win.G_USER.img || win.G_USER.avatarUrl),
-      };
+      });
     }
 
     // 检查其他可能的全局变量
@@ -1799,13 +2358,13 @@ const oschinaDetector: PlatformAuthDetector = {
         log('oschina', '从全局变量获取到用户信息', userData);
         // 尝试多种可能的用户名字段
         const nickname = userData.account || userData.nick || userData.nickname || userData.name || userData.userName || userData.user_name;
-        return {
+        return await reconcileWithBackground({
           loggedIn: true,
           platform: 'oschina',
           userId: String(userData.id || userData.uid),
           nickname: nickname || '开源中国用户',
           avatar: normalizeUrl(userData.portrait || userData.avatar || userData.img || userData.avatarUrl),
-        };
+        });
       }
     }
 
@@ -1833,7 +2392,7 @@ const oschinaDetector: PlatformAuthDetector = {
               log('oschina', '从 API 获取到用户信息', { id: user.id, name: user.name, account: user.account, nick: user.nick });
               // 尝试多种可能的用户名字段
               const nickname = user.account || user.nick || user.nickname || user.name || user.userName || user.user_name;
-              return {
+              return await reconcileWithBackground({
                 loggedIn: true,
                 platform: 'oschina',
                 userId: String(user.id),
@@ -1843,7 +2402,7 @@ const oschinaDetector: PlatformAuthDetector = {
                   followersCount: user.fansCount,
                   articlesCount: user.blogCount,
                 },
-              };
+              });
             }
           } catch (parseErr) {
             log('oschina', 'API 响应解析失败', parseErr);
@@ -1858,13 +2417,13 @@ const oschinaDetector: PlatformAuthDetector = {
     const domUser = extractUserFromDom();
     if (domUser.userId || domUser.nickname || domUser.avatar) {
       log('oschina', '从 DOM 获取到用户信息', domUser);
-      return {
+      return await reconcileWithBackground({
         loggedIn: true,
         platform: 'oschina',
         userId: domUser.userId,
         nickname: domUser.nickname || '开源中国用户',
         avatar: domUser.avatar,
-      };
+      });
     }
     
     // 5. 检查登录/退出按钮
@@ -1881,11 +2440,11 @@ const oschinaDetector: PlatformAuthDetector = {
         const el = document.querySelector(selector);
         if (el) {
           log('oschina', '检测到退出按钮，判定为已登录', { selector });
-          return {
+          return await reconcileWithBackground({
             loggedIn: true,
             platform: 'oschina',
             nickname: '开源中国用户',
-          };
+          });
         }
       } catch {}
     }
@@ -1922,11 +2481,11 @@ const oschinaDetector: PlatformAuthDetector = {
       
       if (hasOscid || hasUserId) {
         log('oschina', '从 Cookie 检测到登录状态', { hasOscid, hasUserId });
-        return {
+        return await reconcileWithBackground({
           loggedIn: true,
           platform: 'oschina',
           nickname: '开源中国用户',
-        };
+        });
       }
     } catch (e) {
       log('oschina', 'Cookie 检测失败', e);
