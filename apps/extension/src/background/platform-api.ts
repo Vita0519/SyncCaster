@@ -180,7 +180,7 @@ export interface UserInfo {
   error?: string;
   errorType?: AuthErrorType;  // 错误类型
   retryable?: boolean;        // 是否可重试
-  detectionMethod?: 'api' | 'cookie' | 'html';  // 检测方式
+  detectionMethod?: 'api' | 'cookie' | 'html' | 'tab';  // 检测方式
   cookieExpiresAt?: number;   // Cookie 最早过期时间（毫秒时间戳）
   meta?: {
     level?: number;
@@ -1907,26 +1907,45 @@ const segmentfaultApi: PlatformApiConfig = {
                 normalizeSlug(user.href) ||
                 normalizeSlug(user.name);
               // 思否 API 中 name 是 URL slug，nickname 才是真实显示名称
-              // 优先使用 nickname，其次是 nick，最后才是 name（slug）
-              const nickname = String(user.nickName || user.nickname || user.nick || user.displayName || userId || '').trim();
+              // 优先使用 nickname，其次是 nick，不使用 userId 作为昵称（因为 userId 是 slug）
+              let nickname = String(user.nickName || user.nickname || user.nick || user.displayName || '').trim();
               let avatar = normalizeUrl(user.avatar || user.avatarUrl || user.avatar_url || user.head);
 
-              if (!userId || !avatar) {
+              // 如果没有获取到有效的昵称或头像，从用户主页获取
+              // 注意：不能用 userId 作为昵称，因为 userId 是 slug（如 abc123），不是真实用户名
+              const needFetchProfile = !nickname || !avatar || nickname === userId;
+              if (needFetchProfile && userId) {
+                try {
+                  const profileResult = await fetchSegmentfaultUserProfile(userId);
+                  if (profileResult.nickname && profileResult.nickname !== userId) {
+                    nickname = profileResult.nickname;
+                  }
+                  if (profileResult.avatar) {
+                    avatar = avatar || profileResult.avatar;
+                  }
+                } catch { }
+              }
+
+              // 如果还是没有昵称/头像，尝试从 HTML 页面获取
+              if (!userId || !avatar || !nickname) {
                 try {
                   const htmlResult = await fetchSegmentfaultUserFromHtml();
                   if (htmlResult.loggedIn) {
                     userId = userId || htmlResult.userId;
                     avatar = avatar || htmlResult.avatar;
+                    if (!nickname && htmlResult.nickname && htmlResult.nickname !== '思否用户') {
+                      nickname = htmlResult.nickname;
+                    }
                   }
                 } catch { }
               }
 
-              logger.info('segmentfault', `从 API ${endpoint} 获取到用户信息`, { userId, nickname });
+              logger.info('segmentfault', `从 API ${endpoint} 获取到用户信息`, { userId, nickname, avatar: !!avatar });
               return {
                 loggedIn: true,
                 platform: 'segmentfault',
                 userId: userId,
-                nickname: nickname || '思否用户',
+                nickname: nickname || userId || '思否用户',
                 avatar: avatar || undefined,
                 meta: {
                   followersCount: user.followers || user.follower_count || user.followersCount,
@@ -1944,22 +1963,585 @@ const segmentfaultApi: PlatformApiConfig = {
       }
     }
 
-    // 方法2: 从思否主页 HTML 中提取用户信息
-    logger.info('segmentfault', 'API 检测失败，尝试从 HTML 提取用户信息');
+    // 方法2: 使用隐藏标签页 + 注入脚本读取 DOM（避免 WAF 拦截）
+    logger.info('segmentfault', 'API 检测失败，尝试使用标签页注入方式检测');
     try {
-      const htmlResult = await fetchSegmentfaultUserFromHtml();
-      if (htmlResult.loggedIn) {
-        return htmlResult;
+      const tabResult = await detectSegmentfaultViaTab();
+      if (tabResult.loggedIn) {
+        return tabResult;
       }
     } catch (e: any) {
-      logger.warn('segmentfault', 'HTML 提取失败', { error: e.message });
+      logger.warn('segmentfault', '标签页检测失败', { error: e.message });
     }
 
     // 方法3: 使用 Cookie 检测（只能判断登录状态，无法获取用户信息）
-    logger.info('segmentfault', 'HTML 提取失败，尝试 Cookie 检测');
+    logger.info('segmentfault', '标签页检测失败，尝试 Cookie 检测');
     return detectViaCookies('segmentfault');
   },
 };
+
+/**
+ * 通过隐藏标签页 + 注入脚本检测思否登录状态
+ * 
+ * 这种方式模拟真实用户浏览行为，避免 WAF 拦截：
+ * 1. 创建一个非激活的后台标签页访问思否主页
+ * 2. 等待页面加载完成
+ * 3. 注入脚本读取页面 DOM 中的用户信息
+ * 4. 获取数据后关闭标签页
+ */
+async function detectSegmentfaultViaTab(): Promise<UserInfo> {
+  // 检查缓存，避免短时间内重复创建标签页
+  if (segmentfaultTabDetectionCache && 
+      Date.now() - segmentfaultTabDetectionCache.timestamp < SEGMENTFAULT_CACHE_TTL) {
+    logger.info('segmentfault', '使用缓存的检测结果');
+    return segmentfaultTabDetectionCache.result;
+  }
+  
+  let tab: chrome.tabs.Tab | null = null;
+  
+  try {
+    // 1. 创建隐藏标签页
+    tab = await chrome.tabs.create({ 
+      url: 'https://segmentfault.com/', 
+      active: false 
+    });
+    
+    if (!tab.id) {
+      throw new Error('无法创建标签页');
+    }
+    
+    const tabId = tab.id;
+    logger.info('segmentfault', '创建隐藏标签页', { tabId });
+
+    // 2. 轮询注入脚本读取 DOM（不等整页 complete，降低平均检测耗时）
+    const startedAt = Date.now();
+    const timeoutMs = 6000;
+    let result: any;
+    let injectImmediatelySupported = true;
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        const injection: any = {
+          target: { tabId },
+          func: extractSegmentfaultUserFromDom,
+        };
+        if (injectImmediatelySupported) {
+          injection.injectImmediately = true;
+        }
+        const results = await chrome.scripting.executeScript(injection);
+        const candidate = results?.[0]?.result;
+        if (candidate) result = candidate;
+
+        const candidateNickname = typeof candidate?.nickname === 'string' ? candidate.nickname.trim() : '';
+        const candidateUserId = typeof candidate?.userId === 'string' ? candidate.userId.trim() : '';
+        const hasMeaningfulNickname =
+          !!candidateNickname && candidateNickname !== '思否用户' && (!candidateUserId || candidateNickname !== candidateUserId);
+
+        if (candidate?.loggedIn && hasMeaningfulNickname) break;
+      } catch (e: any) {
+        if (injectImmediatelySupported) {
+          const message = String(e?.message || e);
+          if (message.includes('injectImmediately')) {
+            injectImmediatelySupported = false;
+          }
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    logger.info('segmentfault', '标签页注入脚本执行结果', result);
+     
+    let userInfo: UserInfo;
+    if (result?.loggedIn) {
+      userInfo = {
+        loggedIn: true,
+        platform: 'segmentfault',
+        userId: result.userId,
+        nickname: result.nickname || result.userId || '思否用户',
+        avatar: result.avatar,
+        detectionMethod: 'tab',
+      };
+    } else {
+      userInfo = {
+        loggedIn: false,
+        platform: 'segmentfault',
+        error: result?.error || '未检测到登录状态',
+        errorType: AuthErrorType.LOGGED_OUT,
+        detectionMethod: 'tab',
+      };
+    }
+    
+    // 缓存结果
+    segmentfaultTabDetectionCache = { result: userInfo, timestamp: Date.now() };
+    
+    return userInfo;
+  } finally {
+    // 4. 关闭标签页
+    if (tab?.id) {
+      try {
+        await chrome.tabs.remove(tab.id);
+        logger.info('segmentfault', '已关闭隐藏标签页');
+      } catch {}
+    }
+  }
+}
+
+// 缓存思否检测结果，避免短时间内重复创建标签页
+let segmentfaultTabDetectionCache: { result: UserInfo; timestamp: number } | null = null;
+const SEGMENTFAULT_CACHE_TTL = 30000; // 30秒缓存
+
+/**
+ * 在思否页面中执行的 DOM 提取函数
+ * 此函数会被注入到标签页中执行
+ */
+function extractSegmentfaultUserFromDom(): { 
+  loggedIn: boolean; 
+  userId?: string; 
+  nickname?: string; 
+  avatar?: string;
+  error?: string;
+} {
+  try {
+    // 辅助函数：检查是否是有效的 slug
+    const isValidSlug = (value: string): boolean => {
+      const v = value.trim();
+      if (!v || v.length > 50) return false;
+      return /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(v) && !/^\d+$/.test(v);
+    };
+    
+    // 辅助函数：检查是否是有效的昵称
+    const isValidNickname = (text: string): boolean => {
+      if (!text || text.length > 50) return false;
+      const excludedTexts = ['登录', '注册', '退出', '设置', '我的', '首页', '写文章', 'Login', 'Register', 'Settings', '消息', '通知'];
+      const trimmed = text.trim();
+      if (!trimmed) return false;
+      // 排除纯 slug 格式
+      if (isValidSlug(trimmed)) return false;
+      return !excludedTexts.some(e => trimmed === e || trimmed.toLowerCase() === e.toLowerCase());
+    };
+    
+    let userId: string | undefined;
+    let nickname: string | undefined;
+    let avatar: string | undefined;
+    
+    // 方法1: 从 __NEXT_DATA__ 提取（Next.js 应用，最可靠）
+    const nextDataScript = document.querySelector('script#__NEXT_DATA__');
+    if (nextDataScript?.textContent) {
+      try {
+        const nextData = JSON.parse(nextDataScript.textContent);
+        // 递归查找用户信息
+        const findUser = (obj: any, depth = 0): any => {
+          if (!obj || depth > 6) return null;
+          if (typeof obj !== 'object') return null;
+          // 检查是否是用户对象
+          if (obj.nickname && typeof obj.nickname === 'string' && obj.slug) {
+            return obj;
+          }
+          // 检查常见字段
+          for (const key of ['user', 'userInfo', 'currentUser', 'pageProps', 'props', 'data', 'state']) {
+            if (obj[key] && typeof obj[key] === 'object') {
+              const found = findUser(obj[key], depth + 1);
+              if (found) return found;
+            }
+          }
+          // 遍历其他字段
+          for (const key of Object.keys(obj)) {
+            if (typeof obj[key] === 'object') {
+              const found = findUser(obj[key], depth + 1);
+              if (found) return found;
+            }
+          }
+          return null;
+        };
+        const user = findUser(nextData);
+        if (user) {
+          if (user.slug && isValidSlug(user.slug)) userId = user.slug;
+          if (user.nickname && isValidNickname(user.nickname)) nickname = user.nickname;
+          if (user.avatar) avatar = user.avatar.startsWith('//') ? `https:${user.avatar}` : user.avatar;
+        }
+      } catch {}
+    }
+    
+    // 方法2: 从全局变量提取
+    if (!userId || !nickname) {
+      const win = window as any;
+      const sources = [win.__INITIAL_STATE__, win.__NUXT__, win.G_USER, win.USER_INFO];
+      
+      for (const source of sources) {
+        if (!source) continue;
+        const candidates = [source, source.user, source.userInfo, source.currentUser, source.auth?.user];
+        for (const user of candidates) {
+          if (!user || typeof user !== 'object') continue;
+          if (!userId) {
+            const slug = user.slug || user.username || user.user_name || user.name;
+            if (typeof slug === 'string' && isValidSlug(slug)) {
+              userId = slug.trim();
+            }
+          }
+          if (!nickname) {
+            const nameField = typeof user.name === 'string' ? user.name.trim() : '';
+            const displayName =
+              user.nickName ||
+              user.nickname ||
+              user.nick ||
+              user.displayName ||
+              (!isValidSlug(nameField) ? nameField : '');
+            if (typeof displayName === 'string' && displayName.trim() && isValidNickname(displayName)) {
+              nickname = displayName.trim();
+            }
+          }
+          if (!avatar) {
+            const av = user.avatar || user.avatarUrl || user.avatar_url;
+            if (typeof av === 'string' && av.trim()) {
+              avatar = av.startsWith('//') ? `https:${av}` : av;
+            }
+          }
+          if (userId && nickname && avatar) break;
+        }
+        if (userId && nickname && avatar) break;
+      }
+    }
+    
+    // 方法3: 从导航栏用户菜单提取
+    const header = document.querySelector('header, .navbar, nav, [role="navigation"], [class*="header"]');
+    if (header) {
+      // 尽量限定到“当前登录用户菜单”区域，避免误抓文章作者等 /u/{slug} 链接
+      let userMenu: Element | null = null;
+      const dropdownSelectors = [
+        '.nav-user-dropdown',
+        '.user-dropdown',
+        '[class*="nav-user"]',
+        '[class*="user-dropdown"]',
+        '[class*="user-menu"]',
+        '.dropdown',
+        '[class*="dropdown"]',
+      ];
+      for (const selector of dropdownSelectors) {
+        const dropdowns = header.querySelectorAll(selector);
+        for (const dropdown of dropdowns) {
+          const hasUserMenuMarker = !!dropdown.querySelector(
+            'a[href*="/user/settings"], a[href*="/user/logout"], a[href*="logout"], a[href*="settings"]'
+          );
+          if (hasUserMenuMarker) {
+            userMenu = dropdown;
+            break;
+          }
+        }
+        if (userMenu) break;
+      }
+
+      const scope = userMenu || header;
+
+      // 查找指向用户主页的链接 /u/{slug}
+      const userLinks = scope.querySelectorAll('a[href*="/u/"]') as NodeListOf<HTMLAnchorElement>;
+      for (const link of userLinks) {
+        const href = link.href || link.getAttribute('href') || '';
+        const match = href.match(/\/u\/([^\/\?#]+)/);
+        if (match?.[1] && isValidSlug(match[1])) {
+          if (!userId) userId = match[1].trim();
+          
+          // 尝试从链接附近获取头像
+          if (!avatar) {
+            const img = link.querySelector('img') as HTMLImageElement;
+            if (img?.src && !img.src.includes('default') && !img.src.includes('placeholder')) {
+              avatar = img.src;
+            }
+          }
+          
+          // 尝试获取昵称
+          if (!nickname) {
+            const title = link.getAttribute('title')?.trim();
+            if (title && isValidNickname(title)) {
+              nickname = title;
+            }
+          }
+          if (!nickname) {
+            const ariaLabel = link.getAttribute('aria-label')?.trim();
+            if (ariaLabel && isValidNickname(ariaLabel)) {
+              nickname = ariaLabel;
+            }
+          }
+          if (!nickname) {
+            const linkText = link.textContent?.trim();
+            if (linkText && isValidNickname(linkText)) {
+              nickname = linkText;
+            }
+          }
+          if (!nickname) {
+            const nicknameSelectors = [
+              '[class*="nickname"]',
+              '[class*="user-name"]',
+              '[class*="username"]',
+              '.dropdown-toggle span',
+              '[data-toggle] span',
+              '[aria-haspopup] span',
+            ];
+            const containers = [userMenu, link, link.parentElement, link.closest('.dropdown, [class*="dropdown"], [class*="user"]')]
+              .filter(Boolean) as Element[];
+            for (const container of containers) {
+              for (const selector of nicknameSelectors) {
+                const el = container.querySelector(selector);
+                const text = el?.textContent?.trim();
+                if (text && isValidNickname(text)) {
+                  nickname = text;
+                  break;
+                }
+              }
+              if (nickname) break;
+            }
+          }
+           
+          break;
+        }
+      }
+      
+      // 如果没有找到头像，尝试从 header 中的 avatar 类图片获取
+      if (!avatar) {
+        const avatarImgs = header.querySelectorAll('img[class*="avatar"], img[src*="avatar"]') as NodeListOf<HTMLImageElement>;
+        for (const img of avatarImgs) {
+          if (img.src && !img.src.includes('default') && !img.src.includes('placeholder')) {
+            avatar = img.src;
+            break;
+          }
+        }
+      }
+
+      // 如果已登录但用户菜单是“按需渲染”，尝试点击一次头像/菜单触发器展开下拉菜单（节流，避免来回切换）
+      if (!userId || !nickname) {
+        try {
+          const win = window as any;
+          const lastClickAt = typeof win.__synccaster_sf_menu_click_ts === 'number' ? win.__synccaster_sf_menu_click_ts : 0;
+          if (Date.now() - lastClickAt > 1500) {
+            const avatarImg =
+              (header.querySelector('img[src*="cdn.segmentfault"], img[class*="avatar"], img[src*="avatar"]') as HTMLImageElement) ||
+              null;
+            const trigger = (avatarImg?.closest(
+              '[aria-haspopup], [aria-expanded], [data-toggle], .dropdown-toggle, button, [role="button"]'
+            ) || null) as HTMLElement | null;
+            if (trigger && trigger.getAttribute('aria-expanded') !== 'true') {
+              trigger.click();
+              win.__synccaster_sf_menu_click_ts = Date.now();
+            }
+          }
+        } catch {}
+      }
+    }
+    
+    // 方法4: 检查是否有登录按钮（未登录标识）
+    const loginBtnSelectors = [
+      'a[href*="/user/login"]',
+      '.login-btn',
+    ];
+    
+    let hasLoginBtn = false;
+    for (const selector of loginBtnSelectors) {
+      try {
+        const el = document.querySelector(selector);
+        if (el && (el.textContent?.includes('登录') || el.textContent?.includes('Login'))) {
+          hasLoginBtn = true;
+          break;
+        }
+      } catch {}
+    }
+    
+    // 方法4: 检查是否有退出/设置按钮（已登录标识）
+    const loggedInSelectors = [
+      'a[href*="/user/logout"]',
+      'a[href*="/user/settings"]',
+    ];
+    
+    let hasLoggedInMarker = false;
+    for (const selector of loggedInSelectors) {
+      if (document.querySelector(selector)) {
+        hasLoggedInMarker = true;
+        break;
+      }
+    }
+    
+    // 判断登录状态
+    if (userId || hasLoggedInMarker) {
+      return {
+        loggedIn: true,
+        userId,
+        nickname,
+        avatar,
+      };
+    }
+    
+    if (hasLoginBtn) {
+      return {
+        loggedIn: false,
+        error: '检测到登录按钮',
+      };
+    }
+    
+    return {
+      loggedIn: false,
+      error: '未检测到登录状态',
+    };
+  } catch (e: any) {
+    return {
+      loggedIn: false,
+      error: e.message || '检测异常',
+    };
+  }
+}
+
+/**
+ * 从思否用户主页获取用户信息
+ * 
+ * 访问 https://segmentfault.com/u/{userId} 获取用户的真实昵称和头像
+ * 用户主页包含用户的显示名称（不是 slug）和头像 URL
+ * 
+ * @param userId 用户的 slug（如 abc123）
+ * @returns 包含 nickname 和 avatar 的对象
+ */
+async function fetchSegmentfaultUserProfile(userId: string): Promise<{ nickname?: string; avatar?: string }> {
+  const result: { nickname?: string; avatar?: string } = {};
+  
+  try {
+    const profileUrl = `https://segmentfault.com/u/${userId}`;
+    const res = await fetchWithCookies(profileUrl, {
+      headers: {
+        'Accept': 'text/html,application/xhtml+xml',
+        'Referer': 'https://segmentfault.com/',
+      },
+    });
+
+    if (!res.ok) {
+      logger.warn('segmentfault', `获取用户主页失败: HTTP ${res.status}`, { userId });
+      return result;
+    }
+
+    const html = await res.text();
+    
+    // 方法1: 从 __INITIAL_STATE__ 或 __NUXT__ 中提取用户信息
+    const stateMarkers = ['__INITIAL_STATE__', '__NUXT__', 'window.__INITIAL_STATE__'];
+    for (const marker of stateMarkers) {
+      const markerIdx = html.indexOf(marker);
+      if (markerIdx >= 0) {
+        // 查找 JSON 对象的开始
+        const startIdx = html.indexOf('{', markerIdx);
+        if (startIdx >= 0 && startIdx < markerIdx + 100) {
+          // 简单提取 JSON（找到匹配的结束括号）
+          let depth = 0;
+          let inString = false;
+          let escape = false;
+          for (let i = startIdx; i < Math.min(html.length, startIdx + 50000); i++) {
+            const ch = html[i];
+            if (inString) {
+              if (escape) escape = false;
+              else if (ch === '\\') escape = true;
+              else if (ch === '"') inString = false;
+              continue;
+            }
+            if (ch === '"') { inString = true; continue; }
+            if (ch === '{') depth++;
+            else if (ch === '}') {
+              depth--;
+              if (depth === 0) {
+                try {
+                  const json = JSON.parse(html.slice(startIdx, i + 1));
+                  // 递归查找用户信息
+                  const findUser = (obj: any, maxDepth = 5): any => {
+                    if (!obj || maxDepth <= 0) return null;
+                    if (typeof obj !== 'object') return null;
+                    // 检查是否是用户对象
+                    if (obj.nickname && typeof obj.nickname === 'string' && obj.nickname !== userId) {
+                      return obj;
+                    }
+                    if (obj.user && typeof obj.user === 'object') {
+                      const found = findUser(obj.user, maxDepth - 1);
+                      if (found) return found;
+                    }
+                    if (obj.userInfo && typeof obj.userInfo === 'object') {
+                      const found = findUser(obj.userInfo, maxDepth - 1);
+                      if (found) return found;
+                    }
+                    for (const key of Object.keys(obj)) {
+                      if (typeof obj[key] === 'object') {
+                        const found = findUser(obj[key], maxDepth - 1);
+                        if (found) return found;
+                      }
+                    }
+                    return null;
+                  };
+                  const user = findUser(json);
+                  if (user) {
+                    if (user.nickname && user.nickname !== userId) {
+                      result.nickname = user.nickname;
+                    }
+                    if (user.avatar || user.avatarUrl || user.avatar_url) {
+                      let avatar = user.avatar || user.avatarUrl || user.avatar_url;
+                      if (avatar.startsWith('//')) avatar = `https:${avatar}`;
+                      result.avatar = avatar;
+                    }
+                    if (result.nickname) {
+                      logger.info('segmentfault', `从用户主页 JSON 获取到用户信息`, { userId, nickname: result.nickname });
+                      return result;
+                    }
+                  }
+                } catch { }
+                break;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // 方法2: 从 HTML 中提取用户名（通常在 h1 或 h3 标签中）
+    // 思否用户主页的用户名通常在 class 包含 "username" 或 "nickname" 的元素中
+    const nicknamePatterns = [
+      /<h1[^>]*class="[^"]*(?:username|nickname|user-name)[^"]*"[^>]*>([^<]+)<\/h1>/i,
+      /<h3[^>]*class="[^"]*(?:username|nickname|user-name|text-center)[^"]*"[^>]*>([^<]+)<\/h3>/i,
+      /<span[^>]*class="[^"]*(?:username|nickname|user-name)[^"]*"[^>]*>([^<]+)<\/span>/i,
+      /<div[^>]*class="[^"]*user-info[^"]*"[^>]*>[\s\S]*?<(?:h1|h2|h3|span)[^>]*>([^<]+)<\/(?:h1|h2|h3|span)>/i,
+      // 思否用户主页的用户名格式
+      /<h1[^>]*>([^<]+)<\/h1>/i,
+    ];
+    
+    for (const pattern of nicknamePatterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        const nickname = match[1].trim();
+        // 过滤掉无效的用户名
+        if (nickname && nickname.length <= 50 && nickname !== userId && 
+            !['思否', '登录', '注册', 'SegmentFault'].includes(nickname)) {
+          result.nickname = nickname;
+          break;
+        }
+      }
+    }
+
+    // 方法3: 从 HTML 中提取头像
+    const avatarPatterns = [
+      /<img[^>]*class="[^"]*(?:avatar|user-avatar)[^"]*"[^>]*src="([^"]+)"/i,
+      /<img[^>]*src="([^"]+)"[^>]*class="[^"]*(?:avatar|user-avatar)[^"]*"/i,
+      /avatar[^"]*"[^>]*src="(https?:\/\/[^"]+(?:avatar|head)[^"]*)"/i,
+    ];
+    
+    for (const pattern of avatarPatterns) {
+      const match = html.match(pattern);
+      if (match && match[1]) {
+        let avatar = match[1].trim();
+        if (avatar.startsWith('//')) avatar = `https:${avatar}`;
+        if (avatar.startsWith('http')) {
+          result.avatar = avatar;
+          break;
+        }
+      }
+    }
+
+    if (result.nickname || result.avatar) {
+      logger.info('segmentfault', `从用户主页获取到用户信息`, { userId, nickname: result.nickname, avatar: !!result.avatar });
+    }
+  } catch (e: any) {
+    logger.warn('segmentfault', `获取用户主页失败`, { userId, error: e.message });
+  }
+
+  return result;
+}
 
 /**
  * 从思否主页 HTML 中提取用户信息
@@ -2159,7 +2741,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
         loggedIn: true,
         platform: 'segmentfault',
         userId,
-        nickname: displayName || '思否用户',
+        nickname: displayName || userId || '思否用户',
         avatar: normalizeUrl(user.avatar || user.avatarUrl || user.avatar_url),
         detectionMethod: 'html',
       };
@@ -2261,8 +2843,10 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
         /<div[^>]*class="[^"]*(?:user-info|profile-info|avatar-container)[^"]*"[^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i,
         // data-avatar 属性
         /data-avatar=["']([^"']+)["']/i,
-        // 思否 CDN 头像链接
-        /<img[^>]+src=["'](https?:\/\/[^"']*(?:avatar|static)[^"']*segmentfault[^"']*\.(?:jpg|jpeg|png|gif|webp)[^"']*)["']/i,
+        // 思否 CDN 头像链接（更宽松的匹配）
+        /<img[^>]+src=["'](https?:\/\/[^"']*(?:avatar|static|cdn)[^"']*\.(?:jpg|jpeg|png|gif|webp)[^"']*)["']/i,
+        // 任何带 avatar 关键字的图片
+        /<img[^>]+(?:src|data-src)=["']([^"']*avatar[^"']*)["']/i,
       ];
 
       for (const pattern of settingsAvatarPatterns) {
@@ -2271,7 +2855,35 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
           const url = match[1].trim();
           if (url && !/default|placeholder|logo|icon|banner/i.test(url)) {
             avatar = normalizeUrl(url);
-            if (avatar) break;
+            if (avatar) {
+              logger.info('segmentfault', '从 settings 页面提取到头像', { avatar: avatar.substring(0, 80) });
+              break;
+            }
+          }
+        }
+      }
+      
+      // 从 JSON 数据提取头像
+      if (!avatar) {
+        const jsonMarkers = ['__INITIAL_STATE__', '__NUXT__', 'window.__INITIAL_STATE__'];
+        for (const marker of jsonMarkers) {
+          const markerIdx = html.indexOf(marker);
+          if (markerIdx >= 0) {
+            // 使用正则直接提取 avatar 字段
+            const avatarMatch = html.substring(markerIdx, markerIdx + 50000).match(/"avatar"\s*:\s*"([^"]+)"/);
+            if (avatarMatch?.[1]) {
+              let av = avatarMatch[1].trim();
+              if (av && !/default|placeholder/i.test(av)) {
+                if (av.startsWith('//')) av = `https:${av}`;
+                if (av.startsWith('http') || av.startsWith('/')) {
+                  avatar = normalizeUrl(av);
+                  if (avatar) {
+                    logger.info('segmentfault', '从 settings JSON 提取到头像', { avatar: avatar.substring(0, 80) });
+                    break;
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -2361,20 +2973,138 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     }
 
     if (!nickname && sourceLabel === 'settings') {
-      const inputMatch = html.match(
-        /<input[^>]+name=["'](?:name|nickname|displayName)["'][^>]*value=["']([^"']+)["']/i
-      );
-      const value = inputMatch?.[1] ? decodeHtmlEntities(inputMatch[1]).trim() : '';
-      if (value && value.length < 50 && !isSlugLike(value) && isValidNickname(value)) {
-        nickname = value;
+      // 思否 settings 页面的昵称可能在多种位置：
+      // 1. input 表单字段
+      // 2. JSON 数据（__INITIAL_STATE__ 或 __NUXT__）
+      // 3. 页面标题或其他元素
+      
+      // 方法1: 从 input 表单提取
+      const inputPatterns = [
+        /<input[^>]+name=["'](?:name|nickname|displayName|nick|user_name|userName)["'][^>]*value=["']([^"']+)["']/i,
+        /<input[^>]+value=["']([^"']+)["'][^>]*name=["'](?:name|nickname|displayName|nick|user_name|userName)["']/i,
+        // 思否可能使用 id 而不是 name
+        /<input[^>]+id=["'](?:name|nickname|displayName|nick)["'][^>]*value=["']([^"']+)["']/i,
+        /<input[^>]+value=["']([^"']+)["'][^>]*id=["'](?:name|nickname|displayName|nick)["']/i,
+      ];
+      
+      for (const pattern of inputPatterns) {
+        const inputMatch = html.match(pattern);
+        const value = inputMatch?.[1] ? decodeHtmlEntities(inputMatch[1]).trim() : '';
+        if (value && value.length > 0 && value.length < 50 && !isSlugLike(value) && isValidNickname(value)) {
+          nickname = value;
+          logger.info('segmentfault', '从 settings 表单提取到昵称', { nickname });
+          break;
+        }
+      }
+      
+      // 方法2: 从 JSON 数据提取（__INITIAL_STATE__ 或 __NUXT__）
+      if (!nickname) {
+        const jsonMarkers = ['__INITIAL_STATE__', '__NUXT__', 'window.__INITIAL_STATE__'];
+        for (const marker of jsonMarkers) {
+          const markerIdx = html.indexOf(marker);
+          if (markerIdx >= 0) {
+            const startIdx = html.indexOf('{', markerIdx);
+            if (startIdx >= 0 && startIdx < markerIdx + 100) {
+              let depth = 0;
+              let inString = false;
+              let escape = false;
+              for (let i = startIdx; i < Math.min(html.length, startIdx + 100000); i++) {
+                const ch = html[i];
+                if (inString) {
+                  if (escape) escape = false;
+                  else if (ch === '\\') escape = true;
+                  else if (ch === '"') inString = false;
+                  continue;
+                }
+                if (ch === '"') { inString = true; continue; }
+                if (ch === '{') depth++;
+                else if (ch === '}') {
+                  depth--;
+                  if (depth === 0) {
+                    try {
+                      const json = JSON.parse(html.slice(startIdx, i + 1));
+                      // 递归查找用户信息
+                      const findUserInfo = (obj: any, maxDepth = 6): { nickname?: string; avatar?: string } | null => {
+                        if (!obj || maxDepth <= 0) return null;
+                        if (typeof obj !== 'object') return null;
+                        // 检查是否是用户对象
+                        if (obj.nickname && typeof obj.nickname === 'string') {
+                          const nick = obj.nickname.trim();
+                          if (nick && nick.length < 50 && !isSlugLike(nick) && isValidNickname(nick)) {
+                            return {
+                              nickname: nick,
+                              avatar: obj.avatar || obj.avatarUrl || obj.avatar_url,
+                            };
+                          }
+                        }
+                        // 检查 user/userInfo/currentUser 等常见字段
+                        const userFields = ['user', 'userInfo', 'currentUser', 'profile', 'me', 'account'];
+                        for (const field of userFields) {
+                          if (obj[field] && typeof obj[field] === 'object') {
+                            const found = findUserInfo(obj[field], maxDepth - 1);
+                            if (found?.nickname) return found;
+                          }
+                        }
+                        // 遍历其他字段
+                        for (const key of Object.keys(obj)) {
+                          if (typeof obj[key] === 'object') {
+                            const found = findUserInfo(obj[key], maxDepth - 1);
+                            if (found?.nickname) return found;
+                          }
+                        }
+                        return null;
+                      };
+                      const userInfo = findUserInfo(json);
+                      if (userInfo?.nickname) {
+                        nickname = userInfo.nickname;
+                        logger.info('segmentfault', '从 settings JSON 提取到昵称', { nickname });
+                        if (userInfo.avatar && !avatar) {
+                          let av = userInfo.avatar;
+                          if (av.startsWith('//')) av = `https:${av}`;
+                          avatar = normalizeUrl(av);
+                          logger.info('segmentfault', '从 settings JSON 提取到头像', { avatar: avatar?.substring(0, 80) });
+                        }
+                      }
+                    } catch { }
+                    break;
+                  }
+                }
+              }
+            }
+            if (nickname) break;
+          }
+        }
+      }
+      
+      // 方法3: 从页面标题提取（格式可能是 "用户名 - 设置 - SegmentFault 思否"）
+      // 注意：思否 settings 页面标题通常是 "账号设置 - SegmentFault 思否"，不包含用户名
+      // 所以这个方法在 settings 页面基本不会成功，保留作为备选
+      if (!nickname) {
+        const titleMatch = html.match(/<title>([^<\-]+)\s*[-–—]/i);
+        if (titleMatch?.[1]) {
+          const value = titleMatch[1].trim();
+          // 排除常见的页面标题关键词
+          const excludedTitles = [
+            '设置', '个人设置', '账号设置', '账户设置', '安全设置', '隐私设置',
+            'Settings', 'Account', 'Profile', 'SegmentFault', '思否',
+            '首页', '主页', 'Home', '登录', '注册', 'Login', 'Register'
+          ];
+          if (value && value.length > 0 && value.length < 50 && 
+              !isSlugLike(value) && isValidNickname(value) &&
+              !excludedTitles.some(t => value.includes(t))) {
+            nickname = value;
+            logger.info('segmentfault', '从 settings 页面标题提取到昵称', { nickname });
+          }
+        }
       }
     }
 
     // 4. 如果有用户 slug，尽量从用户主页获取权威昵称/头像（最稳定，避免误抓页面其他用户）
     // settings 页是最可靠的入口：一旦拿到 slug，就用用户主页校准昵称/头像
+    // 注意：用户主页可能被 WAF 拦截，所以这只是补充方案
     const shouldFetchProfile =
       !!userId &&
-      (sourceLabel === 'settings' || !nickname || !avatar || !isValidNickname(nickname) || isSlugLike(nickname));
+      (!nickname || !avatar || !isValidNickname(nickname) || isSlugLike(nickname));
 
     if (shouldFetchProfile) {
       try {
@@ -2382,6 +3112,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
           headers: {
             'Accept': 'text/html,application/xhtml+xml',
             'Referer': 'https://segmentfault.com/',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           },
         });
 
@@ -2389,61 +3120,142 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
           const userPageHtml = await userPageRes.text();
           logger.info('segmentfault', '获取用户主页成功', { userId, length: userPageHtml.length });
 
-          // 思否用户主页的用户名在 h3.text-center 元素中
-          // 结构：<div class="userinfo"><div class="card-body"><h3 class="text-center pt-3">用户名</h3>
-          const userNamePatterns = [
-            // h3.text-center 中的用户名（最可靠）
-            /<h3[^>]*class="[^"]*text-center[^"]*"[^>]*>([^<]+)<\/h3>/i,
-            // userinfo 区域内的 h3
-            /<div[^>]*class="[^"]*userinfo[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i,
-            // card-body 内的 h3
-            /<div[^>]*class="[^"]*card-body[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i,
-            // 页面标题中的用户名（格式：用户名 - SegmentFault 思否）
-            /<title>([^<\-]+)\s*[-–—]/i,
-          ];
-
-          for (const pattern of userNamePatterns) {
-            const match = userPageHtml.match(pattern);
-            if (match?.[1]) {
-              const value = match[1].trim();
-              // 验证是有效的用户名（不是 slug，不是空白，长度合理，不是菜单文本）
-              if (value && value.length > 0 && value.length < 50 && !isSlugLike(value) && isValidNickname(value)) {
-                nickname = value;
-                logger.info('segmentfault', '从用户主页提取到用户名', { nickname });
-                break;
+          // 检查是否被 WAF 拦截（雷池等安全检测页面）
+          const isWafPage = userPageHtml.includes('安全检测') || 
+                           userPageHtml.includes('SafeLine') || 
+                           userPageHtml.includes('challenge') ||
+                           userPageHtml.length < 5000;
+          
+          if (isWafPage) {
+            logger.warn('segmentfault', '用户主页被 WAF 拦截', { userId, length: userPageHtml.length });
+          } else {
+            // 方法1: 从 __NEXT_DATA__ JSON 提取（Next.js 应用）
+            const nextDataMatch = userPageHtml.match(/<script[^>]+id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/i);
+            if (nextDataMatch?.[1]) {
+              try {
+                const nextData = JSON.parse(nextDataMatch[1]);
+                // 递归查找用户信息
+                const findUserInNextData = (obj: any, maxDepth = 8): { nickname?: string; avatar?: string } | null => {
+                  if (!obj || maxDepth <= 0) return null;
+                  if (typeof obj !== 'object') return null;
+                  
+                  // 检查是否是用户对象（思否用户对象通常有 name/nickname 和 avatar）
+                  if (obj.nickname && typeof obj.nickname === 'string') {
+                    const nick = obj.nickname.trim();
+                    if (nick && nick.length < 50 && !isSlugLike(nick) && isValidNickname(nick)) {
+                      return {
+                        nickname: nick,
+                        avatar: obj.avatar || obj.avatarUrl || obj.avatar_url,
+                      };
+                    }
+                  }
+                  // 思否可能使用 name 字段存储显示名称
+                  if (obj.name && typeof obj.name === 'string' && obj.slug) {
+                    const name = obj.name.trim();
+                    if (name && name.length < 50 && name !== obj.slug && !isSlugLike(name) && isValidNickname(name)) {
+                      return {
+                        nickname: name,
+                        avatar: obj.avatar || obj.avatarUrl || obj.avatar_url,
+                      };
+                    }
+                  }
+                  
+                  // 优先检查常见的用户字段
+                  const userFields = ['user', 'userInfo', 'currentUser', 'profile', 'author', 'pageProps', 'props', 'data'];
+                  for (const field of userFields) {
+                    if (obj[field] && typeof obj[field] === 'object') {
+                      const found = findUserInNextData(obj[field], maxDepth - 1);
+                      if (found?.nickname) return found;
+                    }
+                  }
+                  
+                  // 遍历其他字段
+                  for (const key of Object.keys(obj)) {
+                    if (typeof obj[key] === 'object' && !userFields.includes(key)) {
+                      const found = findUserInNextData(obj[key], maxDepth - 1);
+                      if (found?.nickname) return found;
+                    }
+                  }
+                  return null;
+                };
+                
+                const userInfo = findUserInNextData(nextData);
+                if (userInfo?.nickname) {
+                  nickname = userInfo.nickname;
+                  logger.info('segmentfault', '从用户主页 __NEXT_DATA__ 提取到用户名', { nickname });
+                  if (userInfo.avatar && !avatar) {
+                    let av = userInfo.avatar;
+                    if (av.startsWith('//')) av = `https:${av}`;
+                    avatar = normalizeUrl(av);
+                    if (avatar) {
+                      logger.info('segmentfault', '从用户主页 __NEXT_DATA__ 提取到头像', { avatar: avatar.substring(0, 80) });
+                    }
+                  }
+                }
+              } catch (e) {
+                logger.warn('segmentfault', '解析 __NEXT_DATA__ 失败', { error: (e as Error).message });
               }
             }
-          }
 
-          // 头像：以用户主页为准（可覆盖 header 里误抓到的头像）
-          // 思否用户主页头像通常在 .userinfo 或 .card-body 区域
-          const userAvatarPatterns = [
-            // userinfo 区域内的头像（最可靠）
-            /<div[^>]*class="[^"]*userinfo[^"]*"[^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=["']([^"']+)["']/i,
-            // card-body 内的头像
-            /<div[^>]*class="[^"]*card-body[^"]*"[^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=["']([^"']+)["']/i,
-            // 带 avatar 类的图片
-            /<img[^>]+class="[^"]*avatar[^"]*"[^>]+(?:src|data-src)=["']([^"']+)["']/i,
-            /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]+class="[^"]*avatar[^"]*"/i,
-            // 用户头像图片（segmentfault CDN）
-            /<img[^>]+(?:src|data-src)=["'](https?:\/\/[^"']*(?:avatar|user)[^"']*\.(?:jpg|jpeg|png|gif|webp)[^"']*)["']/i,
-            // og:image meta 标签
-            /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
-          ];
+            // 方法2: 从 HTML 元素提取（如果 __NEXT_DATA__ 没有获取到）
+            if (!nickname) {
+              // 思否用户主页的用户名在 h3.text-center 元素中
+              // 结构：<div class="userinfo"><div class="card-body"><h3 class="text-center pt-3">用户名</h3>
+              const userNamePatterns = [
+                // h3.text-center 中的用户名（最可靠，根据截图）
+                /<h3[^>]*class="[^"]*text-center[^"]*pt-3[^"]*"[^>]*>([^<]+)<\/h3>/i,
+                /<h3[^>]*class="[^"]*pt-3[^"]*text-center[^"]*"[^>]*>([^<]+)<\/h3>/i,
+                /<h3[^>]*class="[^"]*text-center[^"]*"[^>]*>([^<]+)<\/h3>/i,
+                // card-body 内的 h3
+                /<div[^>]*class="[^"]*card-body[^"]*"[^>]*>[\s\S]*?<h3[^>]*>([^<]+)<\/h3>/i,
+                // 页面标题中的用户名（格式：用户名 - SegmentFault 思否）
+                /<title>([^<\-]+)\s*[-–—]\s*SegmentFault/i,
+              ];
 
-          for (const pattern of userAvatarPatterns) {
-            const match = userPageHtml.match(pattern);
-            if (match?.[1]) {
-              const url = match[1].trim();
-              // 验证头像 URL 有效性
-              if (url &&
-                !/default|placeholder|logo|icon|banner/i.test(url) &&
-                (url.includes('avatar') || url.includes('user') || url.includes('head') || /\.(jpg|jpeg|png|gif|webp)/i.test(url))) {
-                const normalized = normalizeUrl(url);
-                if (normalized) {
-                  avatar = normalized;
-                  logger.info('segmentfault', '从用户主页提取到头像', { avatar: avatar.substring(0, 80) });
-                  break;
+              for (const pattern of userNamePatterns) {
+                const match = userPageHtml.match(pattern);
+                if (match?.[1]) {
+                  const value = match[1].trim();
+                  // 验证是有效的用户名（不是 slug，不是空白，长度合理，不是菜单文本）
+                  if (value && value.length > 0 && value.length < 50 && !isSlugLike(value) && isValidNickname(value)) {
+                    nickname = value;
+                    logger.info('segmentfault', '从用户主页 HTML 提取到用户名', { nickname });
+                    break;
+                  }
+                }
+              }
+            }
+
+            // 方法3: 提取头像
+            if (!avatar) {
+              // 思否用户主页头像通常在 .head.rounded-top 区域
+              const userAvatarPatterns = [
+                // head rounded-top 区域内的头像（根据截图结构）
+                /<div[^>]*class="[^"]*head[^"]*rounded-top[^"]*"[^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=["']([^"']+)["']/i,
+                // card-body 内的头像
+                /<div[^>]*class="[^"]*card-body[^"]*"[^>]*>[\s\S]*?<img[^>]+(?:src|data-src)=["']([^"']+)["']/i,
+                // 带 avatar 类的图片
+                /<img[^>]+class="[^"]*avatar[^"]*"[^>]+(?:src|data-src)=["']([^"']+)["']/i,
+                /<img[^>]+(?:src|data-src)=["']([^"']+)["'][^>]+class="[^"]*avatar[^"]*"/i,
+                // og:image meta 标签
+                /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
+              ];
+
+              for (const pattern of userAvatarPatterns) {
+                const match = userPageHtml.match(pattern);
+                if (match?.[1]) {
+                  const url = match[1].trim();
+                  // 验证头像 URL 有效性
+                  if (url &&
+                    !/default|placeholder|logo|icon|banner/i.test(url) &&
+                    (url.includes('avatar') || url.includes('user') || url.includes('head') || /\.(jpg|jpeg|png|gif|webp)/i.test(url))) {
+                    const normalized = normalizeUrl(url);
+                    if (normalized) {
+                      avatar = normalized;
+                      logger.info('segmentfault', '从用户主页提取到头像', { avatar: avatar.substring(0, 80) });
+                      break;
+                    }
+                  }
                 }
               }
             }
@@ -2476,7 +3288,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
         loggedIn: true,
         platform: 'segmentfault',
         userId: userId,
-        nickname: nickname || '思否用户',
+        nickname: nickname || userId || '思否用户',
         avatar: avatar,
         detectionMethod: 'html',
       };
@@ -2496,7 +3308,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
         loggedIn: true,
         platform: 'segmentfault',
         userId: userId,
-        nickname: nickname || '思否用户',
+        nickname: nickname || userId || '思否用户',
         avatar: avatar,
         detectionMethod: 'html',
       };
@@ -2722,11 +3534,14 @@ const oschinaApi: PlatformApiConfig = {
     }
 
     // 3. 如有用户 ID，优先从用户主页补全昵称/头像（用户专属区域，避免误抓）
+    // 重要：只有在 Cookie 检测到登录态或 API 确认登录时，才尝试从首页提取信息
+    // 否则可能会错误地提取到官方推荐用户的信息
     let profileUserId = cookieResult.userId || apiResult.userInfo?.userId;
     let profileFromHome: { userId?: string; nickname?: string; avatar?: string } | null = null;
 
+    const hasLoginEvidence = cookieResult.hasValidCookie || (apiResult.success && apiResult.loggedIn);
     const shouldTryHome =
-      !profileUserId || (apiResult.userInfo && (!apiResult.userInfo.nickname || !apiResult.userInfo.avatar));
+      hasLoginEvidence && (!profileUserId || (apiResult.userInfo && (!apiResult.userInfo.nickname || !apiResult.userInfo.avatar)));
 
     if (shouldTryHome) {
       try {
@@ -2816,7 +3631,9 @@ const oschinaApi: PlatformApiConfig = {
         logger.warn('oschina', '个人空间首页解析失败', { error: e?.message || String(e) });
       }
     }
+    // 只有在有登录证据的情况下，才尝试从用户主页补全信息
     const shouldFetchProfilePage =
+      hasLoginEvidence &&
       !!profileUserId &&
       (!apiResult.userInfo ||
         !apiResult.userInfo.nickname ||
@@ -2989,7 +3806,9 @@ const oschinaApi: PlatformApiConfig = {
       }
     }
 
-    if (profileFromHome && (profileFromHome.nickname || profileFromHome.avatar || profileFromHome.userId)) {
+    // 只有在有登录证据（Cookie 或 API 确认）的情况下，才使用 profileFromHome 的信息
+    // 避免将官方推荐用户误判为当前登录用户
+    if (hasLoginEvidence && profileFromHome && (profileFromHome.nickname || profileFromHome.avatar || profileFromHome.userId)) {
       if (!apiResult.userInfo || !apiResult.userInfo.nickname || !apiResult.userInfo.avatar) {
         apiResult = {
           success: true,

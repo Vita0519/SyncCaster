@@ -830,15 +830,34 @@ export class AccountService {
    */
   private static async saveAccount(platform: string, userInfo: PlatformUserInfo, meta?: LoginState['meta']): Promise<Account> {
     const now = Date.now();
+
+    const cleanedNickname = String(userInfo.nickname || '').trim();
+    const cleanedUserId = String(userInfo.userId || '').trim();
+    let nickname = cleanedNickname;
+
+    if (platform === 'segmentfault' && isGenericNickname(platform, nickname)) {
+      if (
+        cleanedUserId &&
+        /^[a-zA-Z0-9][a-zA-Z0-9_-]{1,49}$/.test(cleanedUserId) &&
+        !cleanedUserId.startsWith('segmentfault_') &&
+        !/^\d+$/.test(cleanedUserId)
+      ) {
+        nickname = cleanedUserId;
+      }
+    }
+
     const account: Account = {
       id: `${platform}-${userInfo.userId}`,
       platform: platform as any,
-      nickname: userInfo.nickname,
+      nickname,
       avatar: userInfo.avatar,
       enabled: true,
       createdAt: now,
       updatedAt: now,
-      meta: meta || {},
+      meta: {
+        ...(meta || {}),
+        ...(platform === 'segmentfault' && userInfo.userId ? { profileId: userInfo.userId } : {}),
+      },
       // 新账号默认为 ACTIVE 状态，启用保护期机制
       status: AccountStatus.ACTIVE,
       lastCheckAt: now,

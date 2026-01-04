@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 登录检测器 - 优化版
  * 
  * 核心思路：优先使用各平台 API 获取用户信息
@@ -2105,102 +2105,48 @@ const oschinaDetector: PlatformAuthDetector = {
       return trimmed;
     };
     
-    // 辅助函数：从 DOM 中提取用户信息
-    // 开源中国的用户信息通常在页面顶部导航栏的用户下拉菜单中
-    const extractUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
+    // 辅助函数：从 DOM 中提取**当前登录用户**的信息
+    // 重要：只从导航栏的"我的"下拉菜单或用户头像区域提取，避免误抓页面上其他用户（如文章作者）的信息
+    // 开源中国的登录用户信息通常在页面顶部导航栏的用户下拉菜单中
+    const extractCurrentUserFromDom = (): { nickname?: string; avatar?: string; userId?: string } => {
       let nickname: string | undefined;
       let avatar: string | undefined;
       let userId: string | undefined;
       
       // 排除的文本（菜单项、按钮等）
-      const excludedTexts = ['登录', '注册', '退出', '设置', '我的', '消息', '收藏', '关注', '开源中国', 'OSCHINA'];
+      const excludedTexts = ['登录', '注册', '退出', '设置', '我的', '消息', '收藏', '关注', '开源中国', 'OSCHINA', '写文章', '发布', '首页'];
       
       const isValidNickname = (text?: string): boolean => {
         if (!text) return false;
         const trimmed = text.trim();
         if (!trimmed || trimmed.length >= 50 || trimmed.length < 2) return false;
         if (excludedTexts.some(excluded => trimmed === excluded || trimmed.toLowerCase() === excluded.toLowerCase())) return false;
+        // 排除纯数字（可能是 ID）
+        if (/^\d+$/.test(trimmed)) return false;
         return true;
       };
 
-      const sidebarScope =
-        document.querySelector('#userSidebar') ||
-        document.querySelector('.sidebar-section.user-info') ||
-        document.querySelector('.space-sidebar') ||
-        document.querySelector('.user-text');
-
-      if (sidebarScope) {
-        const scope = sidebarScope.closest('.sidebar-section.user-info') || sidebarScope;
-        const profileLink = scope.querySelector('a[href*="my.oschina.net/u/"]') as HTMLAnchorElement | null;
-        const href = profileLink?.getAttribute('href') || profileLink?.href || '';
-        const match = href.match(/\/u\/(\d+)/);
-        if (match?.[1]) {
-          userId = match[1];
-        }
-
-        const nicknameCandidates = [
-          scope.querySelector('.user-name .name'),
-          scope.querySelector('.user-name'),
-          scope.querySelector('.user-name__inner'),
-          scope.querySelector('span.name'),
-          scope.querySelector('span[class*="name"]'),
-        ];
-
-        for (const node of nicknameCandidates) {
-          const text = readTextFromEl(node);
-          if (isValidNickname(text)) {
-            nickname = text!.trim();
-            break;
-          }
-        }
-
-        if (!nickname && profileLink) {
-          const linkText = profileLink.textContent?.trim();
-          if (isValidNickname(linkText)) {
-            nickname = linkText;
-          }
-        }
-
-        const avatarContainer = scope.querySelector('.avatar-wrap') || scope.querySelector('img');
-        const rawAvatar = readAvatarUrlFromEl(avatarContainer);
-        const normalizedAvatar = normalizeUrl(rawAvatar, 'https://my.oschina.net') || normalizeUrl(rawAvatar);
-        if (
-          normalizedAvatar &&
-          !normalizedAvatar.includes('logo') &&
-          !normalizedAvatar.includes('icon') &&
-          !normalizedAvatar.includes('favicon') &&
-          !normalizedAvatar.includes('sprite') &&
-          !normalizedAvatar.includes('loading') &&
-          !normalizedAvatar.includes('placeholder') &&
-          !normalizedAvatar.includes('default')
-        ) {
-          avatar = normalizedAvatar;
-        }
-
-        if (userId || nickname || avatar) {
-          return { nickname, avatar, userId };
-        }
-      }
+      // 重要：只从导航栏的用户下拉菜单区域提取，这是当前登录用户的专属区域
+      // 不要从侧边栏或页面内容区域提取，那些可能是其他用户的信息
       
-      // 1. 尝试从导航栏用户区域提取（最可靠）
-      // 开源中国的用户下拉菜单通常在页面顶部
+      // 1. 优先从导航栏的用户下拉菜单提取（最可靠）
+      // 开源中国的用户下拉菜单通常在页面顶部右侧
       const headerEl = document.querySelector('header, .header, nav, .navbar, [class*="header"]');
       if (headerEl) {
-        // 查找用户下拉菜单或用户信息区域
+        // 查找用户下拉菜单或用户信息区域 - 这些是当前登录用户的专属区域
         const userAreaSelectors = [
           '.user-dropdown',
           '.user-menu',
-          '.user-info',
           '.current-user',
           '[class*="user"][class*="dropdown"]',
           '[class*="user"][class*="menu"]',
-          '[class*="user"][class*="info"]',
           '.header-user',
           '.nav-user',
+          // 注意：不包含 .user-info，因为这可能出现在页面其他位置
         ];
         
         for (const selector of userAreaSelectors) {
-          const userArea = headerEl.querySelector(selector) || document.querySelector(selector);
+          const userArea = headerEl.querySelector(selector) || document.querySelector(`header ${selector}, nav ${selector}, .header ${selector}`);
           if (userArea) {
             // 提取用户 ID - 从用户主页链接
             const userLinks = userArea.querySelectorAll('a[href*="/u/"]') as NodeListOf<HTMLAnchorElement>;
@@ -2214,7 +2160,7 @@ const oschinaDetector: PlatformAuthDetector = {
                 if (isValidNickname(linkText)) {
                   nickname = linkText;
                 }
-                log('oschina', '从用户区域提取到 userId', { userId, nickname });
+                log('oschina', '从导航栏用户下拉菜单提取到 userId', { userId, nickname });
                 break;
               }
             }
@@ -2227,7 +2173,6 @@ const oschinaDetector: PlatformAuthDetector = {
                 'img[src*="oscimg"]',
                 'img[src*="static.oschina"]',
                 'img[src*="avatar"]',
-                'img',
               ];
               for (const imgSelector of avatarSelectors) {
                 const img = userArea.querySelector(imgSelector) as HTMLImageElement;
@@ -2235,7 +2180,7 @@ const oschinaDetector: PlatformAuthDetector = {
                     !img.src.includes('default') && !img.src.includes('placeholder') &&
                     !img.src.includes('logo') && !img.src.includes('icon')) {
                   avatar = img.src;
-                  log('oschina', '从用户区域提取到头像', { avatar });
+                  log('oschina', '从导航栏用户下拉菜单提取到头像', { avatar });
                   break;
                 }
               }
@@ -2247,7 +2192,6 @@ const oschinaDetector: PlatformAuthDetector = {
                 '[class*="name"]',
                 '[class*="nick"]',
                 '[class*="account"]',
-                'span',
               ];
               for (const nickSelector of nicknameSelectors) {
                 const nickEl = userArea.querySelector(nickSelector);
@@ -2263,26 +2207,8 @@ const oschinaDetector: PlatformAuthDetector = {
         }
       }
       
-      // 2. 尝试从页面中的用户链接提取（备用）
-      if (!userId) {
-        // 只在导航区域查找，避免误匹配文章作者
-        const navUserLinks = document.querySelectorAll('header a[href*="my.oschina.net/u/"], nav a[href*="my.oschina.net/u/"], .header a[href*="my.oschina.net/u/"]');
-        for (const link of navUserLinks) {
-          const href = (link as HTMLAnchorElement).href;
-          const match = href.match(/\/u\/(\d+)/);
-          if (match?.[1]) {
-            userId = match[1];
-            const linkText = link.textContent?.trim();
-            if (!nickname && isValidNickname(linkText)) {
-              nickname = linkText;
-            }
-            log('oschina', '从导航区域链接提取到 userId', { userId });
-            break;
-          }
-        }
-      }
-      
-      // 3. 尝试从导航栏头像图片提取（备用）
+      // 2. 如果导航栏没有找到，尝试从导航栏的头像图片提取（备用）
+      // 注意：只在导航栏区域查找，避免误匹配页面内容中的头像
       if (!avatar) {
         const headerAvatarSelectors = [
           'header img[class*="avatar"]',
@@ -2310,28 +2236,31 @@ const oschinaDetector: PlatformAuthDetector = {
       try {
         const bg = await fetchPlatformInfoFromBackground('oschina');
         if (bg?.loggedIn) {
-          const mergedUserId = bg.userId || local.userId;
-          const mergedNickname = bg.nickname || local.nickname || '开源中国用户';
-          const mergedAvatar = bg.avatar || local.avatar;
-
-          // 如果本地从页面提取到的是“正在浏览的他人主页”，而 background 基于 Cookie 得到的是当前登录用户，则以 background 为准
-          if (bg.userId && local.userId && bg.userId !== local.userId) {
+          // 重要：background 通过 API 和 Cookie 获取的信息更可靠
+          // 如果 background 有 userId，优先使用 background 的信息
+          // 这样可以避免 DOM 检测误抓其他用户信息的问题
+          
+          if (bg.userId) {
+            log('oschina', 'background 返回了可靠的用户信息，优先使用', { bgUserId: bg.userId, localUserId: local.userId });
             return {
               loggedIn: true,
               platform: 'oschina',
               userId: bg.userId,
-              nickname: mergedNickname,
-              avatar: mergedAvatar,
+              // 优先使用 background 的昵称和头像，因为它们是通过 API 获取的，更可靠
+              nickname: bg.nickname || local.nickname || '开源中国用户',
+              avatar: bg.avatar || local.avatar,
               meta: bg.meta || local.meta,
             };
           }
 
+          // 如果 background 没有 userId，但本地有，使用本地的 userId
+          // 但仍然优先使用 background 的昵称和头像（如果有的话）
           return {
             loggedIn: true,
             platform: 'oschina',
-            userId: mergedUserId,
-            nickname: mergedNickname,
-            avatar: mergedAvatar,
+            userId: local.userId,
+            nickname: bg.nickname || local.nickname || '开源中国用户',
+            avatar: bg.avatar || local.avatar,
             meta: { ...(local.meta || {}), ...(bg.meta || {}) },
           };
         }
@@ -2347,7 +2276,7 @@ const oschinaDetector: PlatformAuthDetector = {
     // 1. 检查是否在登录页面
     if (url.includes('/home/login') || url.includes('/login')) {
       // 检查是否有登录成功的迹象（可能是登录后的重定向）
-      const domUser = extractUserFromDom();
+      const domUser = extractCurrentUserFromDom();
       if (domUser.userId || domUser.nickname) {
         log('oschina', '在登录页但检测到用户信息，可能已登录', domUser);
         return await reconcileWithBackground({
@@ -2445,15 +2374,16 @@ const oschinaDetector: PlatformAuthDetector = {
       log('oschina', 'API 调用失败', e);
     }
     
-    // 4. 从 DOM 中提取用户信息
-    // my.oschina.net 页面可能需要短时间渲染侧边栏（用户信息卡片），这里做一次短等待以提升稳定性
+    // 4. 从导航栏 DOM 中提取当前登录用户信息
+    // 重要：只从导航栏的用户下拉菜单区域提取，避免误抓页面上其他用户的信息
+    // 注意：不要从侧边栏或页面内容区域提取，那些可能是文章作者或其他用户的信息
     const domUser =
       (await waitForValue(() => {
-        const user = extractUserFromDom();
+        const user = extractCurrentUserFromDom();
         return user.userId || user.nickname || user.avatar ? user : undefined;
-      }, { timeoutMs: 2000 })) || extractUserFromDom();
+      }, { timeoutMs: 2000 })) || extractCurrentUserFromDom();
     if (domUser.userId || domUser.nickname || domUser.avatar) {
-      log('oschina', '从 DOM 获取到用户信息', domUser);
+      log('oschina', '从导航栏 DOM 获取到当前登录用户信息', domUser);
       return await reconcileWithBackground({
         loggedIn: true,
         platform: 'oschina',
