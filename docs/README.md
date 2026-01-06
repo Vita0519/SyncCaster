@@ -1,6 +1,63 @@
-# SyncCaster - 多平台内容同步助手
+<div align="center">
 
-一次编辑，处处发布。SyncCaster 是一个浏览器扩展，帮助内容创作者将文章一键同步到多个博客平台。
+# ✨ SyncCaster
+
+_**一次编辑，处处发布**_
+
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Chrome Extension](https://img.shields.io/badge/Chrome-Extension%20MV3-4285F4?logo=googlechrome&logoColor=white)](#)
+[![Vue 3](https://img.shields.io/badge/Vue-3.x-4FC08D?logo=vuedotjs&logoColor=white)](#)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript&logoColor=white)](#)
+
+</div>
+
+SyncCaster 是一个浏览器扩展，帮助内容创作者将文章一键同步到多个博客平台。
+
+> 🔒 本扩展完全本地运行，不收集、不存储任何用户信息。**如需添加更多平台或改善同步准确度，欢迎提 Issue 或 PR**。
+
+## 特性
+
+- 📝 编辑一次，同步到多个平台
+- 🔍 智能采集任意网页文章内容
+- 🔐 自动检测各平台登录状态
+- 📁 同步的标签页自动归入分组，便于管理
+- 🎨 微信公众号同步时完整保留渲染样式
+
+## 已支持的平台
+
+| 平台 | Markdown | LaTeX | 备注 |
+|:----:|:--------:|:-----:|:-----|
+| 掘金 | ✅ | ✅ | |
+| CSDN | ✅ | ✅ | |
+| 博客园 | ✅ | ✅ | 需开启数学公式支持 |
+| 51CTO | ✅ | ✅ | |
+| 腾讯云 | ✅ | ✅ | |
+| 知乎 | ❌ | ⚠️ | 富文本编辑器 |
+| 简书 | ✅ | ❌ | |
+| 阿里云 | ✅ | ⚠️ | |
+| 思否 | ✅ | ⚠️ | |
+| 哔哩哔哩 | ✅ | ❌ | |
+| 微信公众号 | ❌ | ❌ | 富文本编辑器 |
+
+## 快速开始
+
+```bash
+# 安装依赖
+pnpm install
+
+# 开发模式
+pnpm dev
+
+# 构建
+pnpm build
+```
+
+### 加载扩展
+
+1. 打开 Chrome，访问 `chrome://extensions/`
+2. 开启右上角的 **开发者模式**
+3. 点击 **加载已解压的扩展程序**
+4. 选择 `apps/extension/dist` 目录
 
 ## 项目结构
 
@@ -187,26 +244,6 @@ interface Job {
 ```
 
 ## 开发指南
-
-### 环境准备
-
-```bash
-# 安装依赖
-pnpm install
-
-# 开发模式
-pnpm dev
-
-# 构建
-pnpm build
-```
-
-### 加载扩展
-
-1. 打开 Chrome，访问 `chrome://extensions/`
-2. 开启"开发者模式"
-3. 点击"加载已解压的扩展程序"
-4. 选择 `apps/extension/dist` 目录
 
 ### 添加新适配器
 

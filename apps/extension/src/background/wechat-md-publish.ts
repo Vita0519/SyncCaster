@@ -119,7 +119,7 @@ export async function publishWechatFromMdEditor(
     const result: any = await executeInOrigin(editorUrl, fillTitleOnly, [{ title, author: author || undefined }], { closeTab: false, active: true, reuseKey });
 
     if (result?.success) {
-      return { success: true, message: '\u5df2\u6253\u5f00\u5fae\u4fe1\u516c\u4f17\u53f7\u53d1\u6587\u9875\u9762\u5e76\u586b\u5145\u6807\u9898\uff0c\u8bf7\u70b9\u51fb\u4e0a\u65b9\u201c\u590d\u5236\u201d\u6309\u94ae\u590d\u5236\u5185\u5bb9\u540e\u5728\u53d1\u6587\u9875\u9762\u624b\u52a8\u7c98\u8d34\u6b63\u6587', url: result?.url, needManualCopy: true };
+      return { success: true, message: '\u5df2\u6253\u5f00\u5fae\u4fe1\u516c\u4f17\u53f7\u53d1\u6587\u9875\u9762\u5e76\u586b\u5145\u6807\u9898\uff0c\u8bf7\u5728\u6b63\u6587\u7f16\u8f91\u533a\u76f4\u63a5\u6309 Ctrl+V \u7c98\u8d34\u6b63\u6587\u5185\u5bb9', url: result?.url, needManualCopy: true };
     }
     return { success: false, error: result?.error || '\u6253\u5f00\u516c\u4f17\u53f7\u53d1\u6587\u9875\u6210\u529f\uff0c\u4f46\u6807\u9898\u586b\u5145\u672a\u786e\u8ba4\uff0c\u8bf7\u68c0\u67e5\u7f16\u8f91\u5668\u9875\u9762', url: result?.url, needManualCopy: true };
   } catch (e: any) {

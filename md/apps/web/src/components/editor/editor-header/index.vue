@@ -149,100 +149,113 @@ function fallbackCopyUsingExecCommand(htmlContent: string) {
 }
 
 // 复制到微信公众号
-async function copy() {
+async function copy(): Promise<boolean> {
   // 如果是 Markdown 源码，直接复制并返回
   if (copyMode.value === `md`) {
     const mdContent = editor.value?.state.doc.toString() || ``
-    await copyContent(mdContent)
-    toast.success(`已复制 Markdown 源码到剪贴板。`)
-    return
+    try {
+      await copyContent(mdContent)
+      toast.success(`已复制 Markdown 源码到剪贴板。`)
+      return true
+    }
+    catch (error) {
+      toast.error(`复制失败，请联系开发者。${normalizeErrorMessage(error)}`)
+      return false
+    }
   }
 
   // 以下处理非 Markdown 的复制流程
   emit(`startCopy`)
 
-  setTimeout(() => {
-    nextTick(async () => {
-      try {
-        await processClipboardContent(primaryColor.value)
+  await delay(350)
+  await nextTick()
+
+  try {
+    await processClipboardContent(primaryColor.value)
+  }
+  catch (error) {
+    toast.error(`处理 HTML 失败，请联系开发者。${normalizeErrorMessage(error)}`)
+    editorRefresh()
+    emit(`endCopy`)
+    return false
+  }
+
+  const clipboardDiv = document.getElementById(`output`)
+
+  if (!clipboardDiv) {
+    toast.error(`未找到复制输出区域，请刷新页面后重试。`)
+    editorRefresh()
+    emit(`endCopy`)
+    return false
+  }
+
+  clipboardDiv.focus()
+  window.getSelection()?.removeAllRanges()
+
+  const temp = clipboardDiv.innerHTML
+
+  if (copyMode.value === `txt`) {
+    try {
+      if (typeof ClipboardItem === `undefined`) {
+        throw new TypeError(`ClipboardItem is not supported in this browser.`)
       }
-      catch (error) {
-        toast.error(`处理 HTML 失败，请联系开发者。${normalizeErrorMessage(error)}`)
+
+      const plainText = clipboardDiv.textContent || ``
+      const clipboardItem = new ClipboardItem({
+        'text/html': new Blob([temp], { type: `text/html` }),
+        'text/plain': new Blob([plainText], { type: `text/plain` }),
+      })
+
+      await writeClipboardItems([clipboardItem])
+    }
+    catch (error) {
+      const fallbackSucceeded = fallbackCopyUsingExecCommand(temp)
+      if (!fallbackSucceeded) {
+        clipboardDiv.innerHTML = output.value
+        window.getSelection()?.removeAllRanges()
         editorRefresh()
+        toast.error(`复制失败，请联系开发者。${normalizeErrorMessage(error)}`)
         emit(`endCopy`)
-        return
+        return false
       }
+    }
+  }
 
-      const clipboardDiv = document.getElementById(`output`)
+  clipboardDiv.innerHTML = output.value
 
-      if (!clipboardDiv) {
-        toast.error(`未找到复制输出区域，请刷新页面后重试。`)
-        editorRefresh()
-        emit(`endCopy`)
-        return
-      }
+  try {
+    if (copyMode.value === `html`) {
+      await copyContent(temp)
+    }
+    else if (copyMode.value === `html-without-style`) {
+      await copyContent(await generatePureHTML(editor.value!.state.doc.toString()))
+    }
+    else if (copyMode.value === `html-and-style`) {
+      await copyContent(exportStore.editorContent2HTML())
+    }
+  }
+  catch (error) {
+    toast.error(`复制失败，请联系开发者。${normalizeErrorMessage(error)}`)
+    emit(`endCopy`)
+    return false
+  }
 
-      clipboardDiv.focus()
-      window.getSelection()?.removeAllRanges()
-
-      const temp = clipboardDiv.innerHTML
-
-      if (copyMode.value === `txt`) {
-        try {
-          if (typeof ClipboardItem === `undefined`) {
-            throw new TypeError(`ClipboardItem is not supported in this browser.`)
-          }
-
-          const plainText = clipboardDiv.textContent || ``
-          const clipboardItem = new ClipboardItem({
-            'text/html': new Blob([temp], { type: `text/html` }),
-            'text/plain': new Blob([plainText], { type: `text/plain` }),
-          })
-
-          await writeClipboardItems([clipboardItem])
-        }
-        catch (error) {
-          const fallbackSucceeded = fallbackCopyUsingExecCommand(temp)
-          if (!fallbackSucceeded) {
-            clipboardDiv.innerHTML = output.value
-            window.getSelection()?.removeAllRanges()
-            editorRefresh()
-            toast.error(`复制失败，请联系开发者。${normalizeErrorMessage(error)}`)
-            emit(`endCopy`)
-            return
-          }
-        }
-      }
-
-      clipboardDiv.innerHTML = output.value
-
-      if (copyMode.value === `html`) {
-        await copyContent(temp)
-      }
-      else if (copyMode.value === `html-without-style`) {
-        await copyContent(await generatePureHTML(editor.value!.state.doc.toString()))
-      }
-      else if (copyMode.value === `html-and-style`) {
-        await copyContent(exportStore.editorContent2HTML())
-      }
-
-      // 输出提示
-      toast.success(
-        copyMode.value === `html`
-          ? `已复制 HTML 源码，请进行下一步操作。`
-          : `已复制渲染后的内容到剪贴板，可直接到公众号后台粘贴。`,
-      )
-      window.dispatchEvent(
-        new CustomEvent(`copyToMp`, {
-          detail: {
-            content: output.value,
-          },
-        }),
-      )
-      editorRefresh()
-      emit(`endCopy`)
-    })
-  }, 350)
+  // 输出提示
+  toast.success(
+    copyMode.value === `html`
+      ? `已复制 HTML 源码，请进行下一步操作。`
+      : `已复制渲染后的内容到剪贴板，可直接到公众号后台粘贴。`,
+  )
+  window.dispatchEvent(
+    new CustomEvent(`copyToMp`, {
+      detail: {
+        content: output.value,
+      },
+    }),
+  )
+  editorRefresh()
+  emit(`endCopy`)
+  return true
 }
 
 function handleCopy(mode: string) {
@@ -258,30 +271,37 @@ function copyToWeChat() {
 // 发布到微信公众号
 async function handlePublishToWechat() {
   if (isPublishing.value) return
-  
+
   isPublishing.value = true
-  
+
   try {
     // 获取当前文章标题和渲染后的 HTML 内容
     const title = currentPost.value?.title || '未命名文章'
     const content = output.value
-    
+
     if (!content) {
       toast.error('请先编写文章内容')
       return
     }
-    
+
+    // 自动复制渲染后的内容到剪贴板（失败不阻断打开微信发文页）
+    copyMode.value = 'txt'
+    const copied = await copy()
+    if (!copied) {
+      toast.info('自动复制失败：请改用上方“复制”按钮后再粘贴。', { duration: 8000 })
+    }
+
     console.log('[header] 发布到微信公众号:', { title, contentLength: content.length })
-    
+
     const result = await publishToWechat({
       title,
       content,
     })
-    
+
     if (result.success) {
       toast.success(result.message)
     } else {
-      // 如果是需要手动复制的情况，显示提示信息
+      // 如果是需要手动粘贴的情况，显示提示信息
       if (result.needManualCopy) {
         toast.info(result.message, { duration: 8000 })
       } else {
