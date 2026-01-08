@@ -147,6 +147,41 @@ const PLATFORMS: Record<string, PlatformConfig> = {
     homeUrl: 'https://www.oschina.net/',
     urlPattern: /oschina\.net/,
   },
+  toutiao: {
+    id: 'toutiao',
+    name: '今日头条',
+    loginUrl: 'https://mp.toutiao.com/',
+    homeUrl: 'https://mp.toutiao.com/',
+    urlPattern: /toutiao\.com/,
+  },
+  infoq: {
+    id: 'infoq',
+    name: 'InfoQ',
+    loginUrl: 'https://xie.infoq.cn/',
+    homeUrl: 'https://xie.infoq.cn/',
+    urlPattern: /infoq\.cn/,
+  },
+  baijiahao: {
+    id: 'baijiahao',
+    name: '百家号',
+    loginUrl: 'https://baijiahao.baidu.com/',
+    homeUrl: 'https://baijiahao.baidu.com/',
+    urlPattern: /baijiahao\.baidu\.com/,
+  },
+  wangyihao: {
+    id: 'wangyihao',
+    name: '网易号',
+    loginUrl: 'https://mp.163.com/',
+    homeUrl: 'https://mp.163.com/',
+    urlPattern: /mp\.163\.com/,
+  },
+  medium: {
+    id: 'medium',
+    name: 'Medium',
+    loginUrl: 'https://medium.com/',
+    homeUrl: 'https://medium.com/me',
+    urlPattern: /medium\.com/,
+  },
 };
 
 /**
@@ -502,17 +537,9 @@ export class AccountService {
   }
 
   private static async maybeEnrichAccountProfile(account: Account): Promise<Account> {
-    if (!this.shouldEnrichProfile(account)) return account;
-    const enriched = await this.tryEnrichAccountProfileViaTab(account);
-    if (!enriched) return account;
-
-    // CSDN：首次补全可能只拿到 profileId（userId），但昵称仍是 userId；再用博客主页二次校准昵称/头像
-    if (account.platform === 'csdn' && this.shouldEnrichProfile(enriched)) {
-      const second = await this.tryEnrichAccountProfileViaTab(enriched);
-      return second || enriched;
-    }
-
-    return enriched;
+    // 无感要求：禁止在账号检测/绑定流程中通过 chrome.tabs.create 打开任何额外页面来“补全资料”。
+    // 昵称/头像应尽量通过 background API/Cookie/HTML 探针完成（不打开标签页）。
+    return account;
   }
   
   /**

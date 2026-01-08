@@ -204,6 +204,90 @@ export const PLATFORM_CONFIGS: Record<string, PlatformCapability> = {
       outputFormat: 'html',
     },
   },
+
+  /**
+   * InfoQ（写作台 xie.infoq.cn）
+   * - 富文本编辑器
+   * - 不支持 Markdown
+   * - 图片通常需要上传
+   */
+  infoq: {
+    id: 'infoq',
+    name: 'InfoQ',
+    support: {
+      markdown: false,
+      html: true,
+      latex: false,
+      externalImages: false,
+      uploadImages: true,
+      richText: true,
+    },
+    limits: {
+      maxImageSize: 5 * 1024 * 1024,
+      allowedImageFormats: ['jpeg', 'jpg', 'png', 'gif'],
+    },
+    strategy: {
+      mathRendering: 'image',
+      imageSource: 'upload',
+      outputFormat: 'html',
+    },
+  },
+
+  /**
+   * 百家号
+   * - 富文本编辑器
+   * - 不支持 Markdown
+   * - 图片通常需要上传
+   */
+  baijiahao: {
+    id: 'baijiahao',
+    name: '百家号',
+    support: {
+      markdown: false,
+      html: true,
+      latex: false,
+      externalImages: false,
+      uploadImages: true,
+      richText: true,
+    },
+    limits: {
+      maxImageSize: 5 * 1024 * 1024,
+      allowedImageFormats: ['jpeg', 'jpg', 'png', 'gif'],
+    },
+    strategy: {
+      mathRendering: 'image',
+      imageSource: 'upload',
+      outputFormat: 'html',
+    },
+  },
+
+  /**
+   * 网易号
+   * - 富文本编辑器
+   * - 不支持 Markdown
+   * - 图片通常需要上传
+   */
+  wangyihao: {
+    id: 'wangyihao',
+    name: '网易号',
+    support: {
+      markdown: false,
+      html: true,
+      latex: false,
+      externalImages: false,
+      uploadImages: true,
+      richText: true,
+    },
+    limits: {
+      maxImageSize: 5 * 1024 * 1024,
+      allowedImageFormats: ['jpeg', 'jpg', 'png', 'gif'],
+    },
+    strategy: {
+      mathRendering: 'image',
+      imageSource: 'upload',
+      outputFormat: 'html',
+    },
+  },
 };
 
 /**

@@ -15,7 +15,10 @@ export type PlatformId =
   | 'segmentfault' // 思否
   | 'bilibili'    // 哔哩哔哩
   | 'medium'      // Medium（国际）
-  | 'toutiao';    // 头条号
+  | 'toutiao'     // 头条号
+  | 'infoq'       // InfoQ
+  | 'baijiahao'   // 百家号
+  | 'wangyihao';  // 网易号
 
 /**
  * 资源引用

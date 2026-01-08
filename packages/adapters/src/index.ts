@@ -11,6 +11,11 @@ export * from './aliyun';
 export * from './segmentfault';
 export * from './bilibili';
 export * from './oschina';
+export * from './medium';
+export * from './toutiao';
+export * from './infoq';
+export * from './baijiahao';
+export * from './wangyihao';
 
 import { registry } from './base';
 import { wechatAdapter } from './wechat';
@@ -25,6 +30,11 @@ import { aliyunAdapter } from './aliyun';
 import { segmentfaultAdapter } from './segmentfault';
 import { bilibiliAdapter } from './bilibili';
 import { oschinaAdapter } from './oschina';
+import { mediumAdapter } from './medium';
+import { toutiaoAdapter } from './toutiao';
+import { infoqAdapter } from './infoq';
+import { baijiahaoAdapter } from './baijiahao';
+import { wangyihaoAdapter } from './wangyihao';
 
 // 注册所有适配器
 registry.register(wechatAdapter);
@@ -39,3 +49,8 @@ registry.register(aliyunAdapter);
 registry.register(segmentfaultAdapter);
 registry.register(bilibiliAdapter);
 registry.register(oschinaAdapter);
+registry.register(mediumAdapter);
+registry.register(toutiaoAdapter);
+registry.register(infoqAdapter);
+registry.register(baijiahaoAdapter);
+registry.register(wangyihaoAdapter);

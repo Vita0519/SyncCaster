@@ -1197,13 +1197,16 @@ const jianshuApi: PlatformApiConfig = {
       if (finalUrl.includes('/sign_in')) return null;
 
       const html = await res.text();
-      const slugMatch = html.match(/href=['"]\/u\/([a-zA-Z0-9]+)['"]/);
+      const slugMatch =
+        html.match(/href=['"]\/u\/([a-zA-Z0-9]+)['"]/i) ||
+        html.match(/href=['"]https?:\/\/www\.jianshu\.com\/u\/([a-zA-Z0-9]+)['"]/i);
       const slug = slugMatch?.[1];
       if (slug && /^\d+$/.test(slug)) return null;
 
       const nameMatch =
-        html.match(/<a[^>]*\bclass=['"][^"']*\bname\b[^"']*['"][^>]*\bhref=['"]\/u\/[a-zA-Z0-9]+['"][^>]*>([^<]+)<\/a>/i) ||
-        html.match(/<a[^>]*\bhref=['"]\/u\/[a-zA-Z0-9]+['"][^>]*\bclass=['"][^"']*\bname\b[^"']*['"][^>]*>([^<]+)<\/a>/i);
+        html.match(/<a[^>]*\bclass=['"][^"']*\bname\b[^"']*['"][^>]*\bhref=['"](?:https?:\/\/www\.jianshu\.com)?\/u\/[a-zA-Z0-9]+['"][^>]*>([^<]+)<\/a>/i) ||
+        html.match(/<a[^>]*\bhref=['"](?:https?:\/\/www\.jianshu\.com)?\/u\/[a-zA-Z0-9]+['"][^>]*\bclass=['"][^"']*\bname\b[^"']*['"][^>]*>([^<]+)<\/a>/i) ||
+        html.match(/<input[^>]*\bname=['"]user\[nickname\]['"][^>]*\bvalue=['"]([^'"]+)['"]/i);
       const nickname = nameMatch?.[1]?.trim();
 
       const avatarMatch =
@@ -1809,20 +1812,167 @@ const tencentCloudApi: PlatformApiConfig = {
     if (hasValidSession) {
       // 尝试从 uin Cookie 获取用户 ID
       // uin 格式可能是 o123456789，需要去掉前缀 o
-      let userId = uinCookie?.value?.replace(/^o/, '') ||
+      let userId =
+        uinCookie?.value?.replace(/^o/, '') ||
         ownerUinCookie?.value?.replace(/^o/, '') ||
-        qcloudUidCookie?.value || undefined;
+        qcloudUidCookie?.value ||
+        undefined;
 
-      logger.info('tencent-cloud', '检测到有效的登录 Cookie，判定为已登录', { userId });
-      // Cookie 检测可能无法获取正确的 userId，所以不设置 userId
-      // 这样点击用户名时会跳转到用户中心而不是错误的主页
+      // Cookie 检测可确认“已登录”，但昵称/头像需要从页面 HTML 兜底获取（不打开标签页）。
+      // 这样能修复后台账号列表里长期显示“腾讯云用户”且无头像的问题。
+      const normalizeUrl = (url?: unknown): string | undefined => {
+        const candidate =
+          typeof url === 'string'
+            ? url
+            : url && typeof url === 'object'
+              ? (url as any).url || (url as any).src || (url as any).href
+              : undefined;
+        if (typeof candidate !== 'string') return undefined;
+        const trimmed = candidate.trim();
+        if (!trimmed || trimmed === '[object Object]') return undefined;
+        if (trimmed.startsWith('//')) return `https:${trimmed}`;
+        return trimmed;
+      };
+
+      const tryParseProfileFromHtml = async (): Promise<Pick<UserInfo, 'nickname' | 'avatar' | 'userId'> | null> => {
+        const endpoints = [
+          'https://cloud.tencent.com/developer/user',
+          'https://cloud.tencent.com/developer/user/info',
+        ];
+
+        for (const url of endpoints) {
+          try {
+            const res = await fetchWithCookies(
+              url,
+              {
+                headers: {
+                  Accept: 'text/html,application/xhtml+xml',
+                  Referer: 'https://cloud.tencent.com/',
+                  'Cache-Control': 'no-cache',
+                  Pragma: 'no-cache',
+                },
+              },
+              0
+            );
+
+            const finalUrl = res.url || url;
+            if (finalUrl.includes('login') || finalUrl.includes('passport')) continue;
+
+            const html = await res.text();
+
+            // 常见信息会以 JSON 形式内嵌（字段名不稳定，做多候选）。
+            const jsonCandidates: any[] = [];
+            const scriptJsonMatches = Array.from(html.matchAll(/<script[^>]*type=["']application\/json["'][^>]*>([\s\S]*?)<\/script>/gi));
+            for (const m of scriptJsonMatches) {
+              const raw = (m[1] || '').trim();
+              if (!raw) continue;
+              try {
+                jsonCandidates.push(JSON.parse(raw));
+              } catch {}
+            }
+
+            const inlineJsonMatches = Array.from(html.matchAll(/\b(__NUXT__|__INITIAL_STATE__|__NEXT_DATA__)\s*=\s*([\s\S]*?);\s*<\/script>/gi));
+            for (const m of inlineJsonMatches) {
+              const raw = (m[2] || '').trim();
+              if (!raw) continue;
+              try {
+                jsonCandidates.push(JSON.parse(raw));
+              } catch {}
+            }
+
+            const pickFromObject = (obj: any): { nickname?: string; avatar?: string; userId?: string } => {
+              if (!obj || typeof obj !== 'object') return {};
+
+              const nickname =
+                obj.nickName ||
+                obj.nickname ||
+                obj.name ||
+                obj.userName ||
+                obj.username ||
+                obj.displayName ||
+                obj.realName;
+
+              const avatar =
+                obj.avatar ||
+                obj.avatarUrl ||
+                obj.avatarURL ||
+                obj.avatar_url ||
+                obj.headUrl ||
+                obj.head_url ||
+                obj.head;
+
+              const uid = obj.uin || obj.uid || obj.userId || obj.id;
+
+              return {
+                nickname: typeof nickname === 'string' ? nickname.trim() : undefined,
+                avatar: normalizeUrl(avatar),
+                userId: uid ? String(uid).trim() : undefined,
+              };
+            };
+
+            const deepScan = (node: any, depth = 0): { nickname?: string; avatar?: string; userId?: string } => {
+              if (!node || depth > 6) return {};
+              const direct = pickFromObject(node);
+              if (direct.nickname || direct.avatar) return direct;
+
+              if (Array.isArray(node)) {
+                for (const item of node) {
+                  const hit = deepScan(item, depth + 1);
+                  if (hit.nickname || hit.avatar) return hit;
+                }
+                return {};
+              }
+
+              if (typeof node === 'object') {
+                for (const key of Object.keys(node)) {
+                  const hit = deepScan((node as any)[key], depth + 1);
+                  if (hit.nickname || hit.avatar) return hit;
+                }
+              }
+              return {};
+            };
+
+            for (const j of jsonCandidates) {
+              const hit = deepScan(j);
+              if (hit.nickname || hit.avatar) return hit;
+            }
+
+            // 兜底：从 HTML img / meta 提取
+            const avatarMatch =
+              html.match(/<img[^>]+src=["']([^"']+)["'][^>]*\b(?:avatar|head|portrait)\b/i) ||
+              html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i);
+            const avatar = normalizeUrl(avatarMatch?.[1]);
+
+            const nameMatch =
+              html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+              html.match(/<title[^>]*>([^<]{2,60})<\/title>/i);
+            const nickname = nameMatch?.[1]?.trim();
+
+            if (nickname || avatar) return { nickname, avatar };
+          } catch (e: any) {
+            logger.debug('tencent-cloud', 'HTML 探针失败', { url, error: e?.message || String(e) });
+          }
+        }
+        return null;
+      };
+
+      const profile = await tryParseProfileFromHtml();
+      const nickname = profile?.nickname?.trim() || '腾讯云用户';
+      const avatar = profile?.avatar || undefined;
+
+      if (profile?.userId && /^\d+$/.test(profile.userId)) {
+        userId = profile.userId;
+      }
+
+      logger.info('tencent-cloud', '检测到有效的登录 Cookie，判定为已登录', { userId, hasProfile: !!(profile?.nickname || profile?.avatar) });
+
       return {
         loggedIn: true,
         platform: 'tencent-cloud',
-        // 只有当 userId 看起来像有效的数字 ID 时才设置
         userId: userId && /^\d+$/.test(userId) ? userId : undefined,
-        nickname: '腾讯云用户',
-        detectionMethod: 'cookie',
+        nickname,
+        avatar,
+        detectionMethod: profile?.nickname || profile?.avatar ? 'html' : 'cookie',
       };
     }
 
@@ -4046,15 +4196,28 @@ const oschinaApi: PlatformApiConfig = {
       };
     }
 
-    // 情况4: HTML 检测确认已登录（有退出按钮或用户下拉菜单）
+    // 情况4: HTML 检测“疑似已登录”（有退出按钮或用户下拉菜单）
+    // 严格模式：仅凭 HTML 标志不允许返回 loggedIn=true，必须有 Cookie/API 的强证据。
     if (htmlResult.success && htmlResult.loggedIn) {
+      if (cookieResult.hasValidCookie || (apiResult.success && apiResult.loggedIn === true)) {
+        return {
+          loggedIn: true,
+          platform: 'oschina',
+          userId: cookieResult.userId || apiResult.userInfo?.userId || htmlResult.userInfo?.userId,
+          // 不从 HTML 提取昵称和头像，避免误抓
+          nickname: apiResult.userInfo?.nickname || '开源中国用户',
+          avatar: apiResult.userInfo?.avatar || undefined,
+          detectionMethod: apiResult.success && apiResult.loggedIn === true ? 'api' : 'cookie',
+        };
+      }
+
+      logger.info('oschina', 'HTML 有登录标志但无 Cookie/API 证据，按未登录处理（可重试）');
       return {
-        loggedIn: true,
+        loggedIn: false,
         platform: 'oschina',
-        userId: cookieResult.userId || htmlResult.userInfo?.userId,
-        // 不从 HTML 提取昵称和头像，避免误抓
-        nickname: '开源中国用户',
-        avatar: undefined,
+        errorType: AuthErrorType.API_ERROR,
+        error: '无法确认登录状态',
+        retryable: true,
         detectionMethod: 'html',
       };
     }
@@ -4187,7 +4350,10 @@ const wechatApi: PlatformApiConfig = {
         slaveUser?.nick_name ||
         slaveUser?.name ||
         slaveUser?.user_name ||
-        slaveUser?.username;
+        slaveUser?.username ||
+        slaveUser?.nick ||
+        slaveUser?.mp_name ||
+        slaveUser?.account_name;
       const avatar =
         slaveUser?.avatar ||
         slaveUser?.headimgurl ||
@@ -4195,7 +4361,9 @@ const wechatApi: PlatformApiConfig = {
         slaveUser?.head_img ||
         slaveUser?.headimg ||
         slaveUser?.headimg_url ||
-        slaveUser?.logo;
+        slaveUser?.logo ||
+        slaveUser?.head_img_url ||
+        slaveUser?.logo_url;
 
       return {
         loggedIn: true,
