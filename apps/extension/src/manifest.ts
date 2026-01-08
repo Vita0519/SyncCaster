@@ -79,6 +79,9 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
 
     // 主机权限（全部12个平台）
     host_permissions: [
+      // favicon（用于账号管理页的平台图标显示）
+      'https://www.google.com/s2/favicons*',
+
       // 微信公众号
       'https://mp.weixin.qq.com/*',
       'https://*.weixin.qq.com/*',

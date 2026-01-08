@@ -31,10 +31,10 @@
           class="account-row"
         >
           <div class="account-left">
-            <n-avatar 
+            <n-avatar
               :size="32"
-              :src="account.avatar" 
-              :fallback-src="`https://api.dicebear.com/7.x/avataaars/svg?seed=${account.nickname}`" 
+              :src="account.avatar || getPlatformIconUrl(account.platform)"
+              :fallback-src="getDefaultIconUrl()"
             />
             <span 
               class="account-name"
@@ -94,7 +94,12 @@
           class="platform-row"
         >
           <div class="platform-left">
-            <span class="platform-icon">{{ platform.icon }}</span>
+            <n-avatar
+              :size="20"
+              :src="getPlatformIconUrl(platform.id)"
+              :fallback-src="getDefaultIconUrl()"
+              class="platform-icon-avatar"
+            />
             <span class="platform-name">{{ platform.name }}</span>
           </div>
           <n-button 
@@ -115,6 +120,9 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { db, type Account } from '@synccaster/core';
 import { useMessage } from 'naive-ui';
 
+const ACCOUNTS_AUTO_REFRESH_THROTTLE_MS = 5 * 1000;
+const ACCOUNTS_AUTO_REFRESH_STORAGE_KEY = 'lastAccountsAutoRefreshAt';
+
 defineProps<{ isDark?: boolean }>();
 const message = useMessage();
 const accounts = ref<Account[]>([]);
@@ -123,19 +131,19 @@ const loginLoadingMap = reactive<Record<string, boolean>>({});
 const refreshingAll = ref(false);
 
 const platforms = [
-  { id: 'juejin', name: '掘金', icon: '🔷' },
-  { id: 'csdn', name: 'CSDN', icon: '📘' },
-  { id: 'zhihu', name: '知乎', icon: '🔵' },
-  { id: 'wechat', name: '微信公众号', icon: '💚' },
-  { id: 'jianshu', name: '简书', icon: '📝' },
-  { id: 'cnblogs', name: '博客园', icon: '🌿' },
-  { id: '51cto', name: '51CTO', icon: '🔶' },
-  { id: 'tencent-cloud', name: '腾讯云开发者社区', icon: '☁️' },
-  { id: 'aliyun', name: '阿里云开发者社区', icon: '🧡' },
-  { id: 'segmentfault', name: '思否', icon: '🟢' },
-  { id: 'bilibili', name: 'B站专栏', icon: '📺' },
-  { id: 'oschina', name: '开源中国', icon: '🔴' },
-];
+  { id: 'juejin', name: '掘金' },
+  { id: 'csdn', name: 'CSDN' },
+  { id: 'zhihu', name: '知乎' },
+  { id: 'wechat', name: '微信公众号' },
+  { id: 'jianshu', name: '简书' },
+  { id: 'cnblogs', name: '博客园' },
+  { id: '51cto', name: '51CTO' },
+  { id: 'tencent-cloud', name: '腾讯云开发者社区' },
+  { id: 'aliyun', name: '阿里云开发者社区' },
+  { id: 'segmentfault', name: '思否' },
+  { id: 'bilibili', name: 'B站专栏' },
+  { id: 'oschina', name: '开源中国' },
+] as const;
 
 const unboundPlatforms = computed(() => {
   const boundPlatformIds = new Set(accounts.value.map(a => a.platform));
@@ -185,7 +193,40 @@ const platformUserUrls: Record<string, (userId?: string) => string> = {
 onMounted(async () => {
   await loadAccounts();
   await quickStatusCheckOnStartup();
+  await autoRefreshAccountsOnEnter();
 });
+
+async function autoRefreshAccountsOnEnter() {
+  if (accounts.value.length === 0) return;
+
+  try {
+    const stored = await chrome.storage.local.get([ACCOUNTS_AUTO_REFRESH_STORAGE_KEY]);
+    const last = stored?.[ACCOUNTS_AUTO_REFRESH_STORAGE_KEY];
+    const lastAt = typeof last === 'number' ? last : 0;
+    const now = Date.now();
+
+    if (lastAt > 0 && now - lastAt < ACCOUNTS_AUTO_REFRESH_THROTTLE_MS) {
+      return;
+    }
+
+    // 先写入节流时间戳，避免用户快速切换导致重复触发
+    await chrome.storage.local.set({ [ACCOUNTS_AUTO_REFRESH_STORAGE_KEY]: now });
+
+    // 关键：从 DB 取最新账号列表再发给 background（避免使用旧的 accounts.value 导致 background 不刷新）
+    const latestAccounts = await db.accounts.toArray();
+    if (latestAccounts.length === 0) return;
+
+
+    await chrome.runtime.sendMessage({
+      type: 'REFRESH_ALL_ACCOUNTS_FAST',
+      data: { accounts: latestAccounts },
+    });
+
+    await loadAccounts();
+  } catch (error) {
+    console.error('Auto refresh accounts failed:', error);
+  }
+}
 
 async function quickStatusCheckOnStartup() {
   if (accounts.value.length === 0) return;
@@ -226,6 +267,17 @@ async function loadAccounts() {
 function getPlatformName(platform: string) {
   const found = platforms.find(p => p.id === platform);
   return found?.name || platform;
+}
+
+function getDefaultIconUrl(): string {
+  return chrome.runtime.getURL('assets/icon-32.png');
+}
+
+function getPlatformIconUrl(platform: string): string {
+  const pageUrl = platformUserUrls[platform]?.();
+  const target = pageUrl || 'https://www.' + platform + '.com/';
+  // Prefer remote favicon to avoid depending on chrome:// pages; this works in extension pages.
+  return `https://www.google.com/s2/favicons?domain_url=${encodeURIComponent(target)}&sz=32`;
 }
 
 function isAccountExpiringSoon(account: Account): boolean {
@@ -596,9 +648,8 @@ async function refreshAllAccounts() {
   gap: 10px;
 }
 
-.platform-icon {
-  font-size: 18px;
-  line-height: 1;
+.platform-icon-avatar {
+  flex-shrink: 0;
 }
 
 .platform-name {

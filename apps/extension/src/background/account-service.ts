@@ -558,50 +558,70 @@ export class AccountService {
   static async quickAddAccount(platform: string): Promise<Account> {
     const platformName = PLATFORM_NAMES[platform] || platform;
     const config = PLATFORMS[platform];
-    
+
     if (!config) {
       throw new Error(`不支持的平台: ${platformName}`);
     }
-    
+
     logger.info('quick-add', `快速添加账号: ${platformName}`);
-    
+
     // 1. 查找已打开的平台标签页
     let tab = await findPlatformTab(platform);
     let needCloseTab = false;
-    
+
     // 2. 如果没有，打开平台主页
     if (!tab) {
       logger.info('quick-add', `未找到 ${platformName} 标签页，打开主页`);
       tab = await chrome.tabs.create({ url: config.homeUrl, active: false });
       needCloseTab = true;
-      
+
       // 等待页面加载
       await new Promise(resolve => setTimeout(resolve, 3000));
     }
-    
+
     if (!tab.id) {
       throw new Error('无法创建标签页');
     }
-    
+
     try {
       // 3. 在标签页中检测登录状态
       logger.info('quick-add', `在标签页 ${tab.id} 中检测登录状态`);
       const state = await checkLoginInTab(tab.id);
-      
+
       if (!state.loggedIn) {
         throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
       }
-      
-      // 4. 保存账号
+
+      // 4. background 再次确认/补齐（避免因 content-script 误判或信息缺失导致落库占位昵称）
+      let bgUserInfo: UserInfo | null = null;
+      try {
+        const info = await fetchPlatformUserInfo(platform);
+        if (info?.loggedIn) bgUserInfo = info;
+        // 对于明确已登出的情况，不应该继续保存为已登录
+        if (info && info.loggedIn === false && info.errorType === AuthErrorType.LOGGED_OUT) {
+          throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
+        }
+      } catch (e: any) {
+        logger.debug('quick-add', 'background 补齐失败，继续使用 tab 信息', { error: e?.message || String(e) });
+      }
+
+      const mergedNickname = pickBetterNickname(platform, state.nickname || platformName + '用户', bgUserInfo?.nickname);
+      const mergedAvatar = pickBetterAvatar(state.avatar, bgUserInfo?.avatar);
+      const mergedUserId = bgUserInfo?.userId || state.userId || `${platform}_${Date.now()}`;
+
+      // 5. 保存账号
       const account = await this.saveAccount(platform, {
-        userId: state.userId || `${platform}_${Date.now()}`,
-        nickname: state.nickname || platformName + '用户',
-        avatar: state.avatar,
+        userId: mergedUserId,
+        nickname: mergedNickname,
+        avatar: mergedAvatar,
         platform,
-      }, state.meta);
-      
+      }, {
+        ...(state.meta || {}),
+        ...(bgUserInfo?.meta || {}),
+      });
+
       logger.info('quick-add', '账号添加成功', { nickname: account.nickname });
-      
+
       return await this.maybeEnrichAccountProfile(account);
     } finally {
       // 如果是我们创建的标签页，关闭它
@@ -696,13 +716,32 @@ export class AccountService {
         logger.info('add-account', '登录成功回调触发', state);
         
         try {
+          // background 再次确认/补齐，避免误判与占位昵称
+          let bgUserInfo: UserInfo | null = null;
+          try {
+            const info = await fetchPlatformUserInfo(platform);
+            if (info?.loggedIn) bgUserInfo = info;
+            if (info && info.loggedIn === false && info.errorType === AuthErrorType.LOGGED_OUT) {
+              throw new Error('登录状态已失效');
+            }
+          } catch (e: any) {
+            logger.debug('add-account', 'background 补齐失败，继续使用 tab 信息', { error: e?.message || String(e) });
+          }
+
+          const mergedNickname = pickBetterNickname(platform, state.nickname || platformName + '用户', bgUserInfo?.nickname);
+          const mergedAvatar = pickBetterAvatar(state.avatar, bgUserInfo?.avatar);
+          const mergedUserId = bgUserInfo?.userId || state.userId || `${platform}_${Date.now()}`;
+
           const account = await this.saveAccount(platform, {
-            userId: state.userId || `${platform}_${Date.now()}`,
-            nickname: state.nickname || platformName + '用户',
-            avatar: state.avatar,
+            userId: mergedUserId,
+            nickname: mergedNickname,
+            avatar: mergedAvatar,
             platform,
-          }, state.meta);
-          
+          }, {
+            ...(state.meta || {}),
+            ...(bgUserInfo?.meta || {}),
+          });
+
           // 关闭登录标签页
           try {
             await chrome.tabs.remove(tabId);
@@ -780,14 +819,30 @@ export class AccountService {
           if (loggedIn) {
             pollingStopped = true;
             this.loginCallbacks.delete(platform);
-            
+
+            // background 再次确认/补齐，避免 tab 侧信息缺失导致保存占位昵称
+            let bgUserInfo: UserInfo | null = null;
+            try {
+              const info = await fetchPlatformUserInfo(platform);
+              if (info?.loggedIn) bgUserInfo = info;
+            } catch (e: any) {
+              logger.debug('add-account', 'background 补齐失败，继续使用检测结果', { error: e?.message || String(e) });
+            }
+
+            const mergedNickname = pickBetterNickname(platform, nickname || platformName + '用户', bgUserInfo?.nickname);
+            const mergedAvatar = pickBetterAvatar(avatar, bgUserInfo?.avatar);
+            const mergedUserId = bgUserInfo?.userId || userId || `${platform}_${Date.now()}`;
+
             const account = await this.saveAccount(platform, {
-              userId: userId || `${platform}_${Date.now()}`,
-              nickname: nickname || platformName + '用户',
-              avatar,
+              userId: mergedUserId,
+              nickname: mergedNickname,
+              avatar: mergedAvatar,
               platform,
-            }, meta);
-            
+            }, {
+              ...(meta || {}),
+              ...(bgUserInfo?.meta || {}),
+            });
+
             // 关闭登录标签页
             try {
               await chrome.tabs.remove(tabId);

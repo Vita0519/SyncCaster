@@ -14,6 +14,8 @@ export interface LoginState {
   avatar?: string;
   platform?: string;
   error?: string;
+  errorType?: string;
+  retryable?: boolean;
   meta?: {
     level?: number;
     followersCount?: number;
@@ -42,13 +44,16 @@ async function fetchPlatformInfoFromBackground(platform: string): Promise<LoginS
       data: { platform },
     });
     const info = resp?.info;
-    if (resp?.success && info?.loggedIn) {
+    if (resp?.success && info) {
       return {
-        loggedIn: true,
+        loggedIn: !!info.loggedIn,
         platform,
         userId: info.userId,
         nickname: info.nickname,
         avatar: info.avatar,
+        error: info.error,
+        errorType: info.errorType,
+        retryable: info.retryable,
         meta: info.meta,
       };
     }
@@ -902,63 +907,47 @@ const cto51Detector: PlatformAuthDetector = {
     const avatarFromDom = shouldWaitForDom ? await waitForValue(() => getAvatarFromDom(), { timeoutMs: 1200 }) : getAvatarFromDom();
 
     // 主页：https://home.51cto.com/space?uid=17025626
+    // ⚠️ 这些 URL 很可能是公开主页，不能作为登录证据；仅作为 userId 线索。
     const spaceUidMatch = url.match(/home\.51cto\.com\/space\?(?:[^#]*&)?uid=(\d+)/);
-    if (spaceUidMatch) {
-      log('51cto', '从 URL 提取到 uid', { userId: spaceUidMatch[1] });
-      return {
-        loggedIn: true,
-        platform: '51cto',
-        userId: spaceUidMatch[1],
-        nickname: nicknameFromDom || '51CTO用户',
-        avatar: avatarFromDom,
-      };
-    }
+    const urlUserId = spaceUidMatch?.[1];
 
     // 旧格式：https://blog.51cto.com/u_17025626
     const blogUidMatch = url.match(/blog\.51cto\.com\/u_(\d+)/);
-    if (blogUidMatch) {
-      log('51cto', '从 URL 提取到 uid', { userId: blogUidMatch[1] });
-      return {
-        loggedIn: true,
-        platform: '51cto',
-        userId: blogUidMatch[1],
-        nickname: nicknameFromDom || '51CTO用户',
-        avatar: avatarFromDom,
-      };
+    const blogUrlUserId = blogUidMatch?.[1];
+
+    const inferredUserId = urlUserId || blogUrlUserId || domUid;
+    if (inferredUserId) {
+      log('51cto', '从 URL/DOM 推断 userId（不作为登录证据）', { userId: inferredUserId });
     }
     
-    // 检查退出按钮
+    // 检查退出按钮（强证据）
     const logoutEl = document.querySelector('a[href*="logout"], a[href*="signout"], a[href*="loginout"]');
     if (logoutEl) {
       return {
         loggedIn: true,
         platform: '51cto',
-        userId: domUid || undefined,
+        userId: inferredUserId || undefined,
         nickname: nicknameFromDom || '51CTO用户',
         avatar: avatarFromDom,
       };
     }
 
-    // 兜底：让 background 用 Cookie 检测（不会触发页面请求）
+    // 让 background 检测（Cookie + HTML，更可靠，且不依赖当前页是否是公开主页）
     try {
-      const resp = await chrome.runtime.sendMessage({
-        type: 'FETCH_PLATFORM_USER_INFO',
-        data: { platform: '51cto' },
-      });
-      const info = resp?.info;
-      if (resp?.success && info?.loggedIn) {
+      const bg = await fetchPlatformInfoFromBackground('51cto');
+      if (bg?.loggedIn) {
         return {
-          loggedIn: true,
+          ...bg,
           platform: '51cto',
-          userId: info.userId || domUid || undefined,
-          nickname: nicknameFromDom || info.nickname || '51CTO用户',
-          avatar: avatarFromDom || info.avatar,
+          userId: bg.userId || inferredUserId || undefined,
+          nickname: (nicknameFromDom && nicknameFromDom !== '51CTO用户') ? nicknameFromDom : (bg.nickname || nicknameFromDom || '51CTO用户'),
+          avatar: avatarFromDom || bg.avatar,
         };
       }
     } catch (e) {
       log('51cto', '后台检测失败', e);
     }
-    
+
     return { loggedIn: false, platform: '51cto' };
   },
 };
@@ -2312,6 +2301,18 @@ const oschinaDetector: PlatformAuthDetector = {
     const reconcileWithBackground = async (local: LoginState): Promise<LoginState> => {
       try {
         const bg = await fetchPlatformInfoFromBackground('oschina');
+
+        // 对齐 background 的严格判定：当后台明确未登录/已登出时，不能继续使用页面上可能误抓到的昵称。
+        if (bg && !bg.loggedIn) {
+          if (bg.errorType === 'logged_out') {
+            return { loggedIn: false, platform: 'oschina' };
+          }
+          // 对于“无法确认”的情况，尽量不要误报为已登录；如果本地没有强证据（userId）则按未登录处理。
+          if (!local.userId) {
+            return { loggedIn: false, platform: 'oschina' };
+          }
+        }
+
         if (bg?.loggedIn) {
           const mergedUserId = bg.userId || local.userId;
           const mergedNickname = bg.nickname || local.nickname || '开源中国用户';
@@ -2514,13 +2515,12 @@ const oschinaDetector: PlatformAuthDetector = {
       const cookies = document.cookie;
       log('oschina', '当前 Cookie', { cookies: cookies.substring(0, 200) });
       
-      // 检查关键 Cookie
+      // 检查关键 Cookie（对齐 background：只使用 oscid/osc_id 避免误判）
       const hasOscid = cookies.includes('oscid=') && !cookies.includes('oscid=;') && !cookies.includes('oscid=deleted');
-      const hasUserId = (cookies.includes('user_id=') || cookies.includes('_user_id=')) && 
-                        !cookies.includes('user_id=;') && !cookies.includes('user_id=deleted');
-      
-      if (hasOscid || hasUserId) {
-        log('oschina', '从 Cookie 检测到登录状态', { hasOscid, hasUserId });
+      const hasOscId = cookies.includes('osc_id=') && !cookies.includes('osc_id=;') && !cookies.includes('osc_id=deleted');
+
+      if (hasOscid || hasOscId) {
+        log('oschina', '从 Cookie 检测到登录状态', { hasOscid, hasOscId });
         return await reconcileWithBackground({
           loggedIn: true,
           platform: 'oschina',

@@ -58,7 +58,7 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
     url: 'https://www.csdn.net/',
     fallbackUrls: ['https://me.csdn.net/', 'https://blog.csdn.net/', 'https://passport.csdn.net/'],
     // CSDN 使用多种 Cookie 来标识登录状态 - 扩展列表
-    sessionCookies: ['UserName', 'UserInfo', 'UserToken', 'uuid_tt_dd', 'c_segment', 'dc_session_id', 'c_first_ref', 'c_first_page', 'loginbox_strategy', 'SESSION', 'UN'],
+    sessionCookies: ['UserName', 'UserNick', 'UserInfo', 'UserToken', 'uuid_tt_dd', 'c_segment', 'dc_session_id', 'c_first_ref', 'c_first_page', 'loginbox_strategy', 'SESSION', 'UN'],
   },
   'zhihu': {
     url: 'https://www.zhihu.com/',
@@ -153,17 +153,8 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
   'oschina': {
     url: 'https://www.oschina.net/',
     fallbackUrls: ['https://my.oschina.net/', 'https://gitee.com/'],
-    // 开源中国登录态 Cookie - 扩展列表
-    sessionCookies: [
-      'oscid',           // 主要会话 Cookie
-      'user_id',         // 用户 ID
-      '_user_id',        // 备用用户 ID
-      'oschina_new_user', // 新用户标识
-      'gitee-session-n', // Gitee 会话（开源中国与 Gitee 共享登录）
-      'gitee_user',      // Gitee 用户
-      'user_locale',     // 用户区域设置（登录后才有）
-      'tz',              // 时区（登录后设置）
-    ],
+    // 对标 cose：只使用 OSCHINA 自身的会话 Cookie，避免因第三方/残留 Cookie 造成误判
+    sessionCookies: ['oscid', 'osc_id'],
   },
   'wechat': {
     url: 'https://mp.weixin.qq.com/',
@@ -946,11 +937,37 @@ const csdnApi: PlatformApiConfig = {
     const iCookies = await chrome.cookies.getAll({ url: 'https://i.csdn.net/' });
     const allCookies = [...mainCookies, ...meCookies, ...blogCookies, ...passportCookies, ...iCookies];
 
-    // 去重
+    const isValidCookieValue = (value?: string) => {
+      if (!value) return false;
+      const trimmed = value.trim();
+      if (!trimmed) return false;
+      const lower = trimmed.toLowerCase();
+      return lower !== 'deleted' && lower !== 'null' && lower !== 'undefined';
+    };
+
+    // 去重（优先保留有值的 Cookie，避免先命中空值/已失效值导致误判）
     const uniqueCookies = new Map<string, chrome.cookies.Cookie>();
     for (const c of allCookies) {
-      if (!uniqueCookies.has(c.name)) {
+      const existing = uniqueCookies.get(c.name);
+      if (!existing) {
         uniqueCookies.set(c.name, c);
+        continue;
+      }
+
+      const existingValid = isValidCookieValue(existing.value);
+      const currentValid = isValidCookieValue(c.value);
+
+      if (!existingValid && currentValid) {
+        uniqueCookies.set(c.name, c);
+        continue;
+      }
+
+      if (currentValid && existingValid) {
+        const existingLen = existing.value?.length || 0;
+        const currentLen = c.value?.length || 0;
+        if (currentLen > existingLen) {
+          uniqueCookies.set(c.name, c);
+        }
       }
     }
     const cookies = Array.from(uniqueCookies.values());
@@ -963,6 +980,7 @@ const csdnApi: PlatformApiConfig = {
     // CSDN 的关键 Cookie - 检查多种可能的登录标识
     // 1. 明确的用户标识 Cookie
     const userNameCookie = cookies.find(c => c.name === 'UserName' && c.value && c.value.length > 0);
+    const userNickCookie = cookies.find(c => c.name === 'UserNick' && c.value && c.value.length > 0);
     const userInfoCookie = cookies.find(c => c.name === 'UserInfo' && c.value && c.value.length > 0);
     const userTokenCookie = cookies.find(c => c.name === 'UserToken' && c.value && c.value.length > 0);
     const unCookie = cookies.find(c => c.name === 'UN' && c.value && c.value.length > 0);
@@ -988,7 +1006,7 @@ const csdnApi: PlatformApiConfig = {
     });
 
     // 优先检查明确的用户标识 Cookie
-    const hasUserCookie = userNameCookie || userInfoCookie || userTokenCookie || unCookie;
+    const hasUserCookie = userNameCookie || userNickCookie || userInfoCookie || userTokenCookie || unCookie;
     // 其次检查登录后才有的 Cookie
     const hasSessionCookie = cSegmentCookie || creativeBtnCookie || loginboxCookie ||
       sessionCookie || dcSessionCookie;
@@ -999,19 +1017,28 @@ const csdnApi: PlatformApiConfig = {
 
     if (hasValidSession) {
       // 尝试从 Cookie 获取用户名
-      const userId = userNameCookie?.value ? decodeURIComponent(userNameCookie.value) :
+      const userIdFromCookie = userNameCookie?.value ? decodeURIComponent(userNameCookie.value) :
+        userNickCookie?.value ? decodeURIComponent(userNickCookie.value) :
         unCookie?.value ? decodeURIComponent(unCookie.value) : undefined;
 
-      // 快速返回，不等待 HTML 抓取
-      // 昵称将由 account-service 的 enrichAccountInfo 异步补全
-      logger.info('csdn', '检测到有效的登录 Cookie，判定为已登录', { userId });
+      // 对标 cose：Cookie 识别登录后，尽量补齐昵称/头像（不打开 tab）
+      let nickname: string | undefined;
+      let avatar: string | undefined;
+
+      if (userIdFromCookie) {
+        const profile = await fetchProfileFromHtml(userIdFromCookie);
+        nickname = profile?.nickname;
+        avatar = profile?.avatar;
+      }
+
+      logger.info('csdn', '检测到有效的登录 Cookie，判定为已登录', { userId: userIdFromCookie, hasProfile: !!(nickname || avatar) });
       return {
         loggedIn: true,
         platform: 'csdn',
-        userId: userId,
-        nickname: userId || 'CSDN用户',  // 临时使用 userId，后续异步补全
-        avatar: undefined,
-        detectionMethod: 'cookie',
+        userId: userIdFromCookie,
+        nickname: nickname || userIdFromCookie || 'CSDN用户',
+        avatar: avatar,
+        detectionMethod: nickname || avatar ? 'html' : 'cookie',
       };
     }
 
@@ -1539,31 +1566,7 @@ const cto51Api: PlatformApiConfig = {
       names: Array.from(new Set(allCookies.map((c) => c.name))).slice(0, 30),
     });
 
-    if (hasSessionCookie || hasUserRelatedCookie) {
-      const pickUserId = () => {
-        const priority = ['uid', 'user_id', 'pub_sid', 'pub_loginuser', 'login_account'];
-        for (const name of priority) {
-          const candidate = allCookies.find(
-            (c) => c.name.toLowerCase() === name && isValidValue(c.value)
-          );
-          if (!candidate?.value) continue;
-          if ((name === 'uid' || name === 'user_id' || name === 'pub_sid') && !/^\d+$/.test(candidate.value)) {
-            continue;
-          }
-          return candidate.value;
-        }
-        return undefined;
-      };
-      const userId = pickUserId();
-
-      return {
-        loggedIn: true,
-        platform: '51cto',
-        userId,
-        nickname: '51CTO用户',
-        detectionMethod: 'cookie',
-      };
-    }
+    // 不做 cookie-only 的登录结论，避免保存固定占位昵称导致误识别。
 
     // HTML probe: https://home.51cto.com/index should contain `#homeBaseVar` when logged in.
     // This avoids depending on specific cookie names and helps when cookie APIs are incomplete.
@@ -1595,6 +1598,29 @@ const cto51Api: PlatformApiConfig = {
       }
 
       const html = await res.text();
+
+      // 明确未登录信号（对齐 cose）：优先判定未登录
+      if (/(?:var\s+isLogin\s*=\s*0|window\.isLogin\s*=\s*0)/.test(html)) {
+        return {
+          loggedIn: false,
+          platform: '51cto',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '未登录',
+          retryable: false,
+          detectionMethod: 'html',
+        };
+      }
+
+      if (/(?:>\s*登录\s*<|home\.51cto\.com\/index\/login)/i.test(html)) {
+        return {
+          loggedIn: false,
+          platform: '51cto',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '需要登录',
+          retryable: false,
+          detectionMethod: 'html',
+        };
+      }
       const baseVarMatch = html.match(
         /<div[^>]*\bid=['"]homeBaseVar['"][^>]*\buser-id=['"](\d+)['"][^>]*>/i
       );
@@ -1602,15 +1628,28 @@ const cto51Api: PlatformApiConfig = {
         const userId = baseVarMatch[1];
         logger.info('51cto', 'HTML probe hit #homeBaseVar', { userId });
         const avatarMatch = html.match(/https?:\/\/[^"']*ucenter\.51cto\.com\/avatar\.php\?[^"']*/i);
-        const nameMatch = html.match(
-          /<div[^>]*\bclass=['"][^"']*name[^"']*['"][^>]*>[\s\S]*?<a[^>]*\bclass=['"]left['"][^>]*>([^<]+)<\/a>/i
-        );
+        const namePatterns = [
+          /<div[^>]*\bclass=['"][^"']*name[^"']*['"][^>]*>[\s\S]*?<a[^>]*\bclass=['"]left['"][^>]*>([^<]+)<\/a>/i,
+          /<div[^>]*\bclass=['"][^"']*user-name[^"']*['"][^>]*>([^<]+)<\/div>/i,
+          /<span[^>]*\bclass=['"][^"']*user-name[^"']*['"][^>]*>([^<]+)<\/span>/i,
+          /<div[^>]*\bclass=['"][^"']*user-base[^"']*['"][^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
+        ];
+
+        let nickname: string | undefined;
+        for (const pattern of namePatterns) {
+          const match = html.match(pattern);
+          const value = match?.[1]?.trim();
+          if (value) {
+            nickname = value;
+            break;
+          }
+        }
 
         return {
           loggedIn: true,
           platform: '51cto',
           userId,
-          nickname: (nameMatch?.[1] || '').trim() || '51CTO用户',
+          nickname: nickname || '51CTO用户',
           avatar: avatarMatch?.[0],
           detectionMethod: 'html',
         };
@@ -3435,7 +3474,7 @@ const oschinaApi: PlatformApiConfig = {
 
       // 开源中国的关键登录态 Cookie
       const oscidCookie = allCookies.find(c => c.name === 'oscid' && isValidValue(c.value));
-      const userIdCookie = allCookies.find(c => (c.name === 'user_id' || c.name === '_user_id') && isValidValue(c.value));
+      const userIdCookie = allCookies.find(c => c.name === 'osc_id' && isValidValue(c.value));
 
       cookieResult.noCookieAtAll = allCookies.length === 0;
 
@@ -3969,13 +4008,15 @@ const oschinaApi: PlatformApiConfig = {
     }
 
     // 情况5: Cookie 有效但 API/HTML 都无法确认
+    // 对标 cose：避免仅凭 Cookie 误判（尤其是三方登录残留），宁可标记为可重试
     if (cookieResult.hasValidCookie) {
-      logger.info('oschina', 'Cookie 有效，判定为已登录');
+      logger.info('oschina', 'Cookie 有效但无法从 API/HTML 确认，标记为可重试');
       return {
-        loggedIn: true,
+        loggedIn: false,
         platform: 'oschina',
-        userId: cookieResult.userId,
-        nickname: '开源中国用户',
+        errorType: AuthErrorType.API_ERROR,
+        error: '无法确认登录状态',
+        retryable: true,
         detectionMethod: 'cookie',
       };
     }
