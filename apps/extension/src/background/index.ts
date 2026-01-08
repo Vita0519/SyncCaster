@@ -306,13 +306,24 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
         return { success: false, error: error.message };
       }
 
+    case 'DEDUP_ACCOUNTS':
+      // 清理重复账号并修正引用（无 UI）
+      logger.info('account', 'Deduplicating accounts');
+      try {
+        await AccountService.deduplicateAccountsByPlatform();
+        return { success: true };
+      } catch (error: any) {
+        logger.error('account', 'Failed to deduplicate accounts', { error });
+        return { success: false, error: error.message };
+      }
+
     case 'REFRESH_ALL_ACCOUNTS_FAST':
       // 批量快速刷新所有账号（并行，无需打开标签页）
       logger.info('account', 'Fast refreshing all accounts', { count: message.data?.accounts?.length });
       try {
         const result = await AccountService.refreshAllAccountsFast(message.data.accounts);
-        return { 
-          success: true, 
+        return {
+          success: true,
           successCount: result.success.length,
           failedCount: result.failed.length,
           successAccounts: result.success,

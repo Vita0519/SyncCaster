@@ -203,6 +203,13 @@ const platformUserUrls: Record<string, (userId?: string) => string> = {
 };
 
 onMounted(async () => {
+  try {
+    // 先做一次去重（后台修复 DB + 引用），避免 UI/自动绑定出现重复平台条目
+    await chrome.runtime.sendMessage({ type: 'DEDUP_ACCOUNTS' });
+  } catch (e) {
+    // 忽略去重失败，不影响主流程
+  }
+
   await loadAccounts();
   await quickStatusCheckOnStartup();
   await autoRefreshAccountsOnEnter();
@@ -330,7 +337,27 @@ async function quickStatusCheckOnStartup() {
 
 async function loadAccounts() {
   try {
-    accounts.value = await db.accounts.toArray();
+    const all = await db.accounts.toArray();
+
+    // UI 层防御性去重：确保同一平台仅展示一个账号
+    const map = new Map<string, Account>();
+    for (const account of all) {
+      const key = String(account.platform);
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, account);
+        continue;
+      }
+
+      const isActive = (a: Account) => (a.status || 'active') === 'active';
+      const score = (a: Account) => (isActive(a) ? 100 : 0) + Math.floor((a.updatedAt || 0) / 1000);
+
+      if (score(account) > score(existing)) {
+        map.set(key, account);
+      }
+    }
+
+    accounts.value = Array.from(map.values());
   } catch (error) {
     console.error('Failed to load accounts:', error);
     message.error('加载账号失败');

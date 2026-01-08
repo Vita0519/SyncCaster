@@ -548,12 +548,8 @@ export class AccountService {
   
   /**
    * 快速添加账号（用户已登录）
-   * 
-   * 流程：
-   * 1. 查找当前是否有该平台的标签页
-   * 2. 如果有，向该标签页发送检测请求
-   * 3. 如果没有，打开平台主页并检测
-   * 4. 检测成功则保存账号
+   *
+   * 无感流程：仅使用 background API/Cookie/HTML 探针，不打开任何标签页。
    */
   static async quickAddAccount(platform: string): Promise<Account> {
     const platformName = PLATFORM_NAMES[platform] || platform;
@@ -565,72 +561,38 @@ export class AccountService {
 
     logger.info('quick-add', `快速添加账号: ${platformName}`);
 
-    // 1. 查找已打开的平台标签页
-    let tab = await findPlatformTab(platform);
-    let needCloseTab = false;
+    // 无感检测：仅使用 background API/Cookie/HTML 探针，不打开标签页
+    const info = await fetchPlatformUserInfo(platform);
 
-    // 2. 如果没有，打开平台主页
-    if (!tab) {
-      logger.info('quick-add', `未找到 ${platformName} 标签页，打开主页`);
-      tab = await chrome.tabs.create({ url: config.homeUrl, active: false });
-      needCloseTab = true;
-
-      // 等待页面加载
-      await new Promise(resolve => setTimeout(resolve, 3000));
+    if (!info?.loggedIn) {
+      // 明确登出：提示登录；不确定/可重试：也提示登录（UI 侧可按需要展示“检测异常”）
+      throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
     }
 
-    if (!tab.id) {
-      throw new Error('无法创建标签页');
-    }
+    const mergedNickname = pickBetterNickname(platform, platformName + '用户', info.nickname);
+    const mergedAvatar = pickBetterAvatar(undefined, info.avatar);
 
-    try {
-      // 3. 在标签页中检测登录状态
-      logger.info('quick-add', `在标签页 ${tab.id} 中检测登录状态`);
-      const state = await checkLoginInTab(tab.id);
+    // 一平台一账号：userId 缺失时用稳定占位，避免 Date.now() 造成重复账号
+    const stableUserId = String(info.userId || 'default').trim() || 'default';
 
-      if (!state.loggedIn) {
-        throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
-      }
-
-      // 4. background 再次确认/补齐（避免因 content-script 误判或信息缺失导致落库占位昵称）
-      let bgUserInfo: UserInfo | null = null;
-      try {
-        const info = await fetchPlatformUserInfo(platform);
-        if (info?.loggedIn) bgUserInfo = info;
-        // 对于明确已登出的情况，不应该继续保存为已登录
-        if (info && info.loggedIn === false && info.errorType === AuthErrorType.LOGGED_OUT) {
-          throw new Error(`请先在浏览器中登录 ${platformName}，然后重试`);
-        }
-      } catch (e: any) {
-        logger.debug('quick-add', 'background 补齐失败，继续使用 tab 信息', { error: e?.message || String(e) });
-      }
-
-      const mergedNickname = pickBetterNickname(platform, state.nickname || platformName + '用户', bgUserInfo?.nickname);
-      const mergedAvatar = pickBetterAvatar(state.avatar, bgUserInfo?.avatar);
-      const mergedUserId = bgUserInfo?.userId || state.userId || `${platform}_${Date.now()}`;
-
-      // 5. 保存账号
-      const account = await this.saveAccount(platform, {
-        userId: mergedUserId,
+    const account = await this.saveAccount(
+      platform,
+      {
+        userId: stableUserId,
         nickname: mergedNickname,
         avatar: mergedAvatar,
         platform,
-      }, {
-        ...(state.meta || {}),
-        ...(bgUserInfo?.meta || {}),
-      });
-
-      logger.info('quick-add', '账号添加成功', { nickname: account.nickname });
-
-      return await this.maybeEnrichAccountProfile(account);
-    } finally {
-      // 如果是我们创建的标签页，关闭它
-      if (needCloseTab && tab.id) {
-        try {
-          await chrome.tabs.remove(tab.id);
-        } catch {}
+      },
+      {
+        ...(info.meta || {}),
+        ...(info.userId ? { profileId: info.userId } : {}),
       }
-    }
+    );
+
+    logger.info('quick-add', '账号添加成功', { nickname: account.nickname });
+
+    // 首次进入自动绑定属于无感流程：禁止通过 tab enrich
+    return account;
   }
   
   /**
@@ -901,27 +863,133 @@ export class AccountService {
       }
     }
 
+    // 一平台一账号：如果已存在该平台账号，复用其 id；同时清理历史重复账号并修正引用
+    const existingAccounts = await db.accounts.where('platform').equals(platform as any).toArray();
+    let existing = existingAccounts[0];
+
+    if (existingAccounts.length > 1) {
+      try {
+        await this.deduplicateAccountsByPlatform(platform);
+        existing = await db.accounts.where('platform').equals(platform as any).first();
+      } catch (e: any) {
+        logger.warn('dedup', '清理重复账号失败（忽略）', { platform, error: e?.message || String(e) });
+      }
+    }
+
+    const id = existing?.id || `${platform}-${cleanedUserId || 'default'}`;
+
     const account: Account = {
-      id: `${platform}-${userInfo.userId}`,
+      id,
       platform: platform as any,
       nickname,
       avatar: userInfo.avatar,
       enabled: true,
-      createdAt: now,
+      createdAt: existing?.createdAt || now,
       updatedAt: now,
       meta: {
+        ...(existing?.meta || {}),
         ...(meta || {}),
-        ...(platform === 'segmentfault' && userInfo.userId ? { profileId: userInfo.userId } : {}),
+        ...(platform === 'segmentfault' && cleanedUserId ? { profileId: cleanedUserId } : {}),
       },
-      // 新账号默认为 ACTIVE 状态，启用保护期机制
       status: AccountStatus.ACTIVE,
       lastCheckAt: now,
       consecutiveFailures: 0,
+      lastError: undefined,
     };
 
     await db.accounts.put(account);
     logger.info('save-account', '账号已保存', { platform, nickname: account.nickname, status: account.status });
     return account;
+  }
+
+  private static isBetterCanonicalAccount(candidate: Account, current: Account): boolean {
+    const isActive = (a: Account) => (a.status || AccountStatus.ACTIVE) === AccountStatus.ACTIVE;
+    const hasBetterNickname = (a: Account) => {
+      const n = String(a.nickname || '').trim();
+      return n && !isGenericNickname(a.platform, n) && n !== `${PLATFORM_NAMES[a.platform] || a.platform}用户`;
+    };
+
+    const candidateScore =
+      (isActive(candidate) ? 100 : 0) +
+      (hasBetterNickname(candidate) ? 10 : 0) +
+      Math.floor((candidate.updatedAt || 0) / 1000);
+
+    const currentScore =
+      (isActive(current) ? 100 : 0) +
+      (hasBetterNickname(current) ? 10 : 0) +
+      Math.floor((current.updatedAt || 0) / 1000);
+
+    return candidateScore > currentScore;
+  }
+
+  static async deduplicateAccountsByPlatform(platform?: string): Promise<void> {
+    const all = await db.accounts.toArray();
+    const groups = new Map<string, Account[]>();
+
+    for (const account of all) {
+      if (platform && account.platform !== (platform as any)) continue;
+      const key = String(account.platform);
+      const arr = groups.get(key) || [];
+      arr.push(account);
+      groups.set(key, arr);
+    }
+
+    for (const [platformId, accounts] of groups) {
+      if (accounts.length <= 1) continue;
+
+      let canonical = accounts[0];
+      for (const a of accounts.slice(1)) {
+        if (this.isBetterCanonicalAccount(a, canonical)) canonical = a;
+      }
+
+      const duplicates = accounts.filter((a) => a.id !== canonical.id);
+      if (duplicates.length === 0) continue;
+
+      logger.warn('dedup', '检测到重复账号，开始清理', {
+        platform: platformId,
+        canonical: canonical.id,
+        duplicates: duplicates.map((d) => d.id),
+      });
+
+      const platformMaps = await db.platformMaps.toArray();
+      for (const d of duplicates) {
+        for (const m of platformMaps) {
+          if (m.platform === (platformId as any) && m.accountId === d.id) {
+            await db.platformMaps.update(m.id, { accountId: canonical.id } as any);
+          }
+        }
+      }
+
+      const jobs = await db.jobs.toArray();
+      for (const job of jobs) {
+        let changed = false;
+        const targets = (job.targets || []).map((t: any) => {
+          const shouldReplace = t?.platform === platformId && duplicates.some((d) => d.id === t.accountId);
+          if (!shouldReplace) return t;
+          changed = true;
+          return { ...t, accountId: canonical.id };
+        });
+
+        const results = (job.results || []).map((r: any) => {
+          const shouldReplace = r?.platform === platformId && duplicates.some((d) => d.id === r.accountId);
+          if (!shouldReplace) return r;
+          changed = true;
+          return { ...r, accountId: canonical.id };
+        });
+
+        if (changed) {
+          await db.jobs.update(job.id, { targets, results, updatedAt: Date.now() } as any);
+        }
+      }
+
+      for (const d of duplicates) {
+        try {
+          await db.accounts.delete(d.id);
+        } catch (e: any) {
+          logger.warn('dedup', '删除重复账号失败（忽略）', { platform: platformId, accountId: d.id, error: e?.message || String(e) });
+        }
+      }
+    }
   }
   
   /**
@@ -1056,10 +1124,7 @@ export class AccountService {
         await db.accounts.put(updated);
         logger.info('refresh-account', '账号信息已更新（API）', { nickname: updated.nickname });
 
-        if (this.shouldEnrichProfile(updated)) {
-          const enriched = await this.tryEnrichAccountProfileViaTab(updated);
-          if (enriched) return enriched;
-        }
+        // 无感刷新：禁止通过 tab enrich
         return updated;
       }
       
@@ -1300,8 +1365,8 @@ export class AccountService {
           };
           
           await db.accounts.put(updated);
-          const enriched = await this.maybeEnrichAccountProfile(updated);
-          success.push(enriched);
+          // 无感批量刷新：禁止通过 tab enrich
+          success.push(updated);
         } else {
           // 检测失败：根据错误类型决定状态
           const isRetryable = userInfo.retryable === true && userInfo.errorType !== AuthErrorType.LOGGED_OUT;

@@ -561,12 +561,40 @@ export async function detectViaCookies(platform: string): Promise<UserInfo> {
       // 计算 Cookie 最早过期时间
       const cookieExpiresAt = getCookieEarliestExpiration(allCookies, config.sessionCookies);
 
+      // 尝试从关键 Cookie 提取稳定 userId（用于一平台一账号的 canonical accountId）
+      const lowerNameToCookie = new Map(allCookies.map((c) => [c.name.toLowerCase(), c] as const));
+      const pickCookieValue = (...names: string[]) => {
+        for (const name of names) {
+          const c = lowerNameToCookie.get(name.toLowerCase());
+          const v = c?.value;
+          if (isValidCookieValue(v)) return String(v).trim();
+        }
+        return undefined;
+      };
+
+      const rawUserIdFromCookie =
+        platform === 'wechat'
+          ? pickCookieValue('bizuin', 'data_bizuin')
+          : platform === 'medium'
+            ? pickCookieValue('uid')
+            : platform === 'toutiao'
+              ? pickCookieValue('uid_tt')
+              : platform === 'infoq'
+                ? pickCookieValue('uid', 'infoq_user_id')
+                : undefined;
+
+      // 仅保留“看起来像公开 UID”的值，避免把 Cookie 秘钥/敏感字段写入 accountId/meta
+      const userIdFromCookie = rawUserIdFromCookie && /^\d{1,24}$/.test(rawUserIdFromCookie)
+        ? rawUserIdFromCookie
+        : undefined;
+
       logger.info('cookie-detect', `${platform} Cookie 检测成功，存在有效会话`, {
         cookieExpiresAt: cookieExpiresAt ? new Date(cookieExpiresAt).toISOString() : 'session'
       });
       return {
         loggedIn: true,
         platform,
+        userId: userIdFromCookie,
         detectionMethod: 'cookie',
         cookieExpiresAt,
       };
