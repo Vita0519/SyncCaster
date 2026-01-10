@@ -87,7 +87,10 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
       'https://edu.51cto.com/',
     ],
     // Avoid PHPSESSID because it is set for guests; rely on login-specific cookies instead
+    // 对齐 cose 项目：使用 www51cto 和 identity 作为主要登录 Cookie
     sessionCookies: [
+      'www51cto',      // cose 项目使用的主要 Cookie
+      'identity',      // cose 项目使用的主要 Cookie
       'pub_sauth1',
       'pub_sauth2',
       'pub_sauth3',
@@ -1800,8 +1803,142 @@ const cto51Api: PlatformApiConfig = {
 
     // 不做 cookie-only 的登录结论，避免保存固定占位昵称导致误识别。
 
-    // HTML probe: https://home.51cto.com/index should contain `#homeBaseVar` when logged in.
-    // This avoids depending on specific cookie names and helps when cookie APIs are incomplete.
+    // 优先使用 blog.51cto.com 页面检测（对齐 cose 项目）
+    // cose 项目使用 userInfoUrl: 'https://blog.51cto.com/' 进行检测
+    // 该页面有 user-base 和 user-name 类的元素，可以正确提取用户名
+    try {
+      // 先获取 blog.51cto.com 的 cookies 用于调试
+      const blogCookies = await chrome.cookies.getAll({ url: 'https://blog.51cto.com/' });
+      logger.info('51cto', 'Blog cookies', {
+        count: blogCookies.length,
+        names: blogCookies.map(c => c.name).slice(0, 20),
+        hasWww51cto: blogCookies.some(c => c.name.toLowerCase() === 'www51cto'),
+        hasIdentity: blogCookies.some(c => c.name.toLowerCase() === 'identity'),
+      });
+
+      const blogRes = await fetchWithCookies(
+        'https://blog.51cto.com/',
+        {
+          headers: {
+            Accept: 'text/html,application/xhtml+xml',
+            Referer: 'https://blog.51cto.com/',
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
+          },
+        },
+        0
+      );
+
+      const blogFinalUrl = blogRes.url || 'https://blog.51cto.com/';
+      logger.info('51cto', 'Blog HTML probe', { status: blogRes.status, finalUrl: blogFinalUrl });
+
+      if (blogFinalUrl.includes('passport.51cto.com')) {
+        return {
+          loggedIn: false,
+          platform: '51cto',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '登录已过期',
+          retryable: false,
+          detectionMethod: 'html',
+        };
+      }
+
+      const blogHtml = await blogRes.text();
+
+      // 调试：记录 HTML 中是否包含登录相关元素
+      const hasUserBase = blogHtml.includes('user-base');
+      const hasUserName = blogHtml.includes('user-name');
+      const hasLoginButton = blogHtml.includes('>登录<') || blogHtml.includes('登录</');
+      const hasIsLogin = blogHtml.includes('isLogin');
+      logger.info('51cto', 'Blog HTML content check', { 
+        hasUserBase, 
+        hasUserName, 
+        hasLoginButton,
+        hasIsLogin,
+        htmlLength: blogHtml.length,
+        // 记录 HTML 片段用于调试
+        snippet: blogHtml.substring(0, 500)
+      });
+
+      // 检测未登录信号（对齐 cose 项目）
+      if (/(?:var\s+isLogin\s*=\s*0|window\.isLogin\s*=\s*0)/.test(blogHtml)) {
+        return {
+          loggedIn: false,
+          platform: '51cto',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '未登录',
+          retryable: false,
+          detectionMethod: 'html',
+        };
+      }
+
+      // 检测顶部导航栏的 "登录" 链接（对齐 cose 项目）
+      if (/<span[^>]*class=["'][^"']*fl[^"']*["'][^>]*>\s*登录\s*<\/span>/i.test(blogHtml) ||
+          /<a[^>]*href=["'][^"']*home\.51cto\.com\/index[^"']*["'][^>]*>[\s\S]*?登录[\s\S]*?<\/a>/i.test(blogHtml)) {
+        return {
+          loggedIn: false,
+          platform: '51cto',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '需要登录',
+          retryable: false,
+          detectionMethod: 'html',
+        };
+      }
+
+      // 提取用户名（对齐 cose 项目的正则模式）
+      const blogNameMatch = 
+        blogHtml.match(/class=["']user-base["'][^>]*>[\s\S]*?<span>\s*([^<]+?)\s*<\/span>/i) ||
+        blogHtml.match(/class=["']user-name["'][^>]*>([^<]+)</i);
+
+      // 提取用户 ID
+      let blogUserId: string | undefined;
+      if (blogNameMatch) {
+        const uidMatch = blogHtml.match(/data-uid=["'](\d+)["']/i);
+        blogUserId = uidMatch?.[1];
+      } else {
+        const headerUserMatch = blogHtml.match(/class=["']header-user["'][\s\S]*?data-uid=["'](\d+)["']/i);
+        blogUserId = headerUserMatch?.[1];
+      }
+
+      let blogNickname: string | undefined;
+      if (blogNameMatch) {
+        blogNickname = blogNameMatch[1]?.trim();
+      } else if (blogUserId) {
+        blogNickname = `User_${blogUserId}`;
+      }
+
+      // 如果找到了用户名或用户ID，说明已登录
+      if (blogNickname || blogUserId) {
+        // 提取头像（对齐 cose 项目）
+        const blogAvatarMatch = 
+          blogHtml.match(/class=["']user-base["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i) ||
+          blogHtml.match(/class=["']nav-insite-bar-avator["'][^>]*src=["']([^"']+)["']/i);
+        let blogAvatar = blogAvatarMatch?.[1];
+        if (blogAvatar?.startsWith('//')) {
+          blogAvatar = 'https:' + blogAvatar;
+        }
+
+        logger.info('51cto', 'Blog HTML probe success', { userId: blogUserId, nickname: blogNickname });
+
+        return {
+          loggedIn: true,
+          platform: '51cto',
+          userId: blogUserId,
+          nickname: blogNickname || '51CTO用户',
+          avatar: blogAvatar,
+          detectionMethod: 'html',
+        };
+      }
+
+      // 如果 blog.51cto.com 没找到用户信息，不要直接判定为未登录
+      // 继续尝试备用检测方案（home.51cto.com）
+      logger.info('51cto', 'Blog HTML probe: no user info found, trying backup detection');
+    } catch (e: any) {
+      logger.warn('51cto', 'Blog HTML probe failed', { error: e?.message || String(e) });
+    }
+
+    // 备用检测：使用 home.51cto.com/index 页面
+    // 该页面有 #homeBaseVar 元素，可以获取 userId，但用户名提取可能不准确
     try {
       const res = await fetchWithCookies(
         'https://home.51cto.com/index',
@@ -1817,7 +1954,7 @@ const cto51Api: PlatformApiConfig = {
       );
 
       const finalUrl = res.url || 'https://home.51cto.com/index';
-      logger.info('51cto', 'HTML probe', { status: res.status, finalUrl });
+      logger.info('51cto', 'Home HTML probe', { status: res.status, finalUrl });
       if (finalUrl.includes('passport.51cto.com')) {
         return {
           loggedIn: false,
@@ -1860,27 +1997,51 @@ const cto51Api: PlatformApiConfig = {
         const userId = baseVarMatch[1];
         logger.info('51cto', 'HTML probe hit #homeBaseVar', { userId });
         let avatar = html.match(/https?:\/\/[^"']*ucenter\.51cto\.com\/avatar\.php\?[^"']*/i)?.[0];
+        
+        // 用户名提取模式（对齐 cose 项目的实现）
+        // 优先级：user-base > user-name > name 区域
         const namePatterns = [
-          /<div[^>]*\bclass=['"][^"']*name[^"']*['"][^>]*>[\s\S]*?<a[^>]*\bclass=['"]left['"][^>]*>([^<]+)<\/a>/i,
+          // cose 项目的主要模式：class="user-base" 内的 <span> 标签
+          /class=["']user-base["'][^>]*>[\s\S]*?<span>\s*([^<]+?)\s*<\/span>/i,
+          // cose 项目的备用模式：class="user-name" 标签
+          /class=["']user-name["'][^>]*>([^<]+)</i,
+          // 扩展模式：带有 user-name 类的 div/span
           /<div[^>]*\bclass=['"][^"']*user-name[^"']*['"][^>]*>([^<]+)<\/div>/i,
           /<span[^>]*\bclass=['"][^"']*user-name[^"']*['"][^>]*>([^<]+)<\/span>/i,
+          // 扩展模式：user-base 内的 span
           /<div[^>]*\bclass=['"][^"']*user-base[^"']*['"][^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
+          // 原有模式：name 区域内的 a.left 链接
+          /<div[^>]*\bclass=['"][^"']*name[^"']*['"][^>]*>[\s\S]*?<a[^>]*\bclass=['"]left['"][^>]*>([^<]+)<\/a>/i,
+          // home.51cto.com 常见：埋点/初始化对象里带 user_name / nickName / nickname
+          /sensors\.registerPage\([\s\S]*?(?:user_name|userName|nickName|nickname)\s*:\s*['"]([^'"]+)['"][\s\S]*?\)/i,
+          /(?:user_name|userName|nickName|nickname)\s*:\s*['"]([^'"]+)['"]/i,
+          /"(?:(?:userName)|(?:nickName)|(?:nickname))"\s*:\s*"([^"]+)"/i,
         ];
 
-        let nickname: string | undefined;
-        for (const pattern of namePatterns) {
-          const match = html.match(pattern);
-          const value = match?.[1]?.trim();
-          if (value) {
-            nickname = value;
-            break;
+        const extractNickname = (source: string): string | undefined => {
+          for (const pattern of namePatterns) {
+            const match = source.match(pattern);
+            const value = match?.[1]?.trim();
+            if (value) return value;
           }
-        }
+          return undefined;
+        };
+
+        // 优先从 #homeBaseVar 标签属性里提取（如存在）
+        const baseVarTag = html.match(/<div[^>]*\bid=['"]homeBaseVar['"][^>]*>/i)?.[0];
+        const nicknameFromBaseVarTag =
+          baseVarTag?.match(/\buser-name=['"]([^'"]+)['"]/i)?.[1] ||
+          baseVarTag?.match(/\bnickname=['"]([^'"]+)['"]/i)?.[1] ||
+          baseVarTag?.match(/\buserName=['"]([^'"]+)['"]/i)?.[1];
+
+        let nickname: string | undefined = nicknameFromBaseVarTag?.trim() || extractNickname(html);
 
         const isMeaningfulNickname = (value?: string) => {
           const trimmed = value?.trim();
           if (!trimmed) return false;
           if (trimmed === '51CTO用户') return false;
+          if (trimmed === userId) return false;
+          if (/51CTO技术家园/i.test(trimmed)) return false;
           if (trimmed.length > 60) return false;
           if (/登录|注册|退出|个人中心/i.test(trimmed)) return false;
           return true;
@@ -1889,8 +2050,44 @@ const cto51Api: PlatformApiConfig = {
         // 兜底：从公开博客主页补齐昵称/头像（不依赖当前页 DOM 结构）
         if (!isMeaningfulNickname(nickname)) {
           try {
-            const profileRes = await fetchWithCookies(
-              `https://blog.51cto.com/u_${userId}`,
+            // 先尝试从 blog.51cto.com 主页获取用户名（对齐 cose 项目）
+            // 先尝试从 home.51cto.com/space 补全昵称/头像（避免 blog.51cto.com WAF 页面）
+            try {
+              const spaceUrl = `https://home.51cto.com/space?uid=${userId}`;
+              const spaceRes = await fetchWithCookies(
+                spaceUrl,
+                {
+                  headers: {
+                    Accept: 'text/html,application/xhtml+xml',
+                    Referer: 'https://home.51cto.com/',
+                    'Cache-Control': 'no-cache',
+                    Pragma: 'no-cache',
+                  },
+                },
+                0
+              );
+
+              const spaceFinalUrl = spaceRes.url || spaceUrl;
+              logger.info('51cto', 'Space HTML probe', { status: spaceRes.status, finalUrl: spaceFinalUrl });
+
+              if (spaceRes.ok && !spaceFinalUrl.includes('passport.51cto.com')) {
+                const spaceHtml = await spaceRes.text();
+                const spaceNickname = extractNickname(spaceHtml);
+                if (isMeaningfulNickname(spaceNickname)) {
+                  nickname = spaceNickname;
+                  logger.info('51cto', 'Got nickname from home space page', { nickname });
+                }
+
+                if (!avatar) {
+                  avatar = spaceHtml.match(/https?:\/\/[^"']*ucenter\.51cto\.com\/avatar\.php\?[^"']*/i)?.[0];
+                }
+              }
+            } catch (e: any) {
+              logger.warn('51cto', 'Space HTML probe failed', { error: e?.message || String(e) });
+            }
+
+            const blogMainRes = await fetchWithCookies(
+              'https://blog.51cto.com/',
               {
                 headers: {
                   Accept: 'text/html,application/xhtml+xml',
@@ -1902,36 +2099,96 @@ const cto51Api: PlatformApiConfig = {
               0
             );
 
-            const finalUrl = profileRes.url || `https://blog.51cto.com/u_${userId}`;
-            if (profileRes.ok && !finalUrl.includes('passport.51cto.com')) {
-              const profileHtml = await profileRes.text();
-              const title = profileHtml.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim();
-              const author = profileHtml
-                .match(/<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i)?.[1]
-                ?.trim();
-
-              const titleCandidate = (author || title || '').trim();
-              if (titleCandidate) {
-                let candidate = titleCandidate
-                  .replace(/\s*[-|–—]\s*51CTO.*$/i, '')
-                  .replace(/\s*[-|–—]\s*51cto.*$/i, '')
-                  .replace(/\s*51CTO博客.*$/i, '')
-                  .replace(/\s*51cto博客.*$/i, '')
-                  .replace(/的博客.*$/i, '')
-                  .trim();
-
-                if (isMeaningfulNickname(candidate)) {
-                  nickname = candidate;
+            if (blogMainRes.ok) {
+              const blogMainHtml = await blogMainRes.text();
+              
+              // 使用 cose 项目的正则模式提取用户名
+              const blogNameMatch = 
+                blogMainHtml.match(/class=["']user-base["'][^>]*>[\s\S]*?<span>\s*([^<]+?)\s*<\/span>/i) ||
+                blogMainHtml.match(/class=["']user-name["'][^>]*>([^<]+)</i);
+              
+              if (blogNameMatch?.[1]) {
+                const blogNickname = blogNameMatch[1].trim();
+                if (isMeaningfulNickname(blogNickname)) {
+                  nickname = blogNickname;
+                  logger.info('51cto', 'Got nickname from blog.51cto.com', { nickname });
                 }
               }
 
+              // 提取头像
               if (!avatar) {
-                avatar =
-                  profileHtml.match(/https?:\/\/[^"']*ucenter\.51cto\.com\/avatar\.php\?[^"']*/i)?.[0] ||
-                  profileHtml.match(/https?:\/\/[^"']*avatar\.php\?[^"']*/i)?.[0];
+                const blogAvatarMatch = 
+                  blogMainHtml.match(/class=["']user-base["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["']/i) ||
+                  blogMainHtml.match(/class=["']nav-insite-bar-avator["'][^>]*src=["']([^"']+)["']/i);
+                if (blogAvatarMatch?.[1]) {
+                  avatar = blogAvatarMatch[1];
+                  if (avatar.startsWith('//')) {
+                    avatar = 'https:' + avatar;
+                  }
+                }
               }
             }
-          } catch {}
+          } catch (e: any) {
+            logger.warn('51cto', 'Failed to get nickname from blog.51cto.com', { error: e?.message });
+          }
+
+          // 如果还是没有昵称，尝试从用户个人博客主页获取
+          if (!isMeaningfulNickname(nickname)) {
+            try {
+              logger.info('51cto', 'Fetching user profile page', { userId, url: `https://blog.51cto.com/u_${userId}` });
+              const profileRes = await fetchWithCookies(
+                `https://blog.51cto.com/u_${userId}`,
+                {
+                  headers: {
+                    Accept: 'text/html,application/xhtml+xml',
+                    Referer: 'https://blog.51cto.com/',
+                    'Cache-Control': 'no-cache',
+                    Pragma: 'no-cache',
+                  },
+                },
+                0
+              );
+
+              const profileFinalUrl = profileRes.url || `https://blog.51cto.com/u_${userId}`;
+              logger.info('51cto', 'Profile page response', { status: profileRes.status, finalUrl: profileFinalUrl });
+              
+              if (profileRes.ok && !profileFinalUrl.includes('passport.51cto.com')) {
+                const profileHtml = await profileRes.text();
+                logger.info('51cto', 'Profile page HTML', { length: profileHtml.length, snippet: profileHtml.substring(0, 300) });
+                
+                const title = profileHtml.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]?.trim();
+                const author = profileHtml
+                  .match(/<meta[^>]+name=["']author["'][^>]+content=["']([^"']+)["']/i)?.[1]
+                  ?.trim();
+
+                logger.info('51cto', 'Profile page meta', { title, author });
+
+                const titleCandidate = (author || title || '').trim();
+                if (titleCandidate) {
+                  let candidate = titleCandidate
+                    .replace(/\s*[-|–—]\s*51CTO.*$/i, '')
+                    .replace(/\s*[-|–—]\s*51cto.*$/i, '')
+                    .replace(/\s*51CTO博客.*$/i, '')
+                    .replace(/\s*51cto博客.*$/i, '')
+                    .replace(/的博客.*$/i, '')
+                    .trim();
+
+                  if (isMeaningfulNickname(candidate)) {
+                    nickname = candidate;
+                    logger.info('51cto', 'Got nickname from profile page', { nickname });
+                  }
+                }
+
+                if (!avatar) {
+                  avatar =
+                    profileHtml.match(/https?:\/\/[^"']*ucenter\.51cto\.com\/avatar\.php\?[^"']*/i)?.[0] ||
+                    profileHtml.match(/https?:\/\/[^"']*avatar\.php\?[^"']*/i)?.[0];
+                }
+              }
+            } catch (e: any) {
+              logger.warn('51cto', 'Failed to fetch profile page', { error: e?.message || String(e) });
+            }
+          }
         }
 
         return {
@@ -1953,7 +2210,7 @@ const cto51Api: PlatformApiConfig = {
         detectionMethod: 'html',
       };
     } catch (e: any) {
-      logger.warn('51cto', 'HTML probe failed', { error: e?.message || String(e) });
+      logger.warn('51cto', 'Home HTML probe failed', { error: e?.message || String(e) });
     }
 
     // 51CTO 的登录 Cookie 结构变动较频繁，且部分 Cookie 可能是分区/分路径的；

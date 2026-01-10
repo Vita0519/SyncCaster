@@ -890,16 +890,46 @@ const cto51Detector: PlatformAuthDetector = {
       undefined;
 
     // DOM: 头像/昵称（用户中心页常见结构）
-    const getNicknameFromDom = () =>
-      readTextFromEl(document.querySelector('.name a.left')) ||
-      readTextFromEl(document.querySelector('.name a')) ||
-      readTextFromEl(document.querySelector('[class*="name"] a.left')) ||
-      readTextFromEl(document.querySelector('[class*="user"] [class*="name"]'));
-    const getAvatarFromDom = () =>
-      readAvatarUrlFromEl(document.querySelector('img[src*="avatar.php"]')) ||
-      readAvatarUrlFromEl(document.querySelector('img[alt="头像"]')) ||
-      readAvatarUrlFromEl(document.querySelector('[class*="avatar"] img')) ||
-      undefined;
+    // 对齐 cose 项目的正则模式
+    const getNicknameFromDom = () => {
+      // 优先使用 cose 项目的模式：class="user-base" 内的 <span> 标签
+      const userBaseEl = document.querySelector('.user-base');
+      if (userBaseEl) {
+        const spanEl = userBaseEl.querySelector('span');
+        const spanText = spanEl?.textContent?.trim();
+        if (spanText && spanText !== '51CTO用户') return spanText;
+      }
+      // 备用模式：class="user-name" 标签
+      const userNameEl = document.querySelector('.user-name');
+      if (userNameEl) {
+        const text = userNameEl.textContent?.trim();
+        if (text && text !== '51CTO用户') return text;
+      }
+      // 原有模式
+      return readTextFromEl(document.querySelector('.name a.left')) ||
+        readTextFromEl(document.querySelector('.name a')) ||
+        readTextFromEl(document.querySelector('[class*="name"] a.left')) ||
+        readTextFromEl(document.querySelector('[class*="user"] [class*="name"]'));
+    };
+    const getAvatarFromDom = () => {
+      // 对齐 cose 项目的模式：class="user-base" 内的 <img> 标签
+      const userBaseEl = document.querySelector('.user-base');
+      if (userBaseEl) {
+        const imgEl = userBaseEl.querySelector('img');
+        const src = imgEl?.getAttribute('src');
+        if (src) return src.startsWith('//') ? 'https:' + src : src;
+      }
+      // 备用模式：class="nav-insite-bar-avator"
+      const avatarEl = document.querySelector('.nav-insite-bar-avator') as HTMLImageElement | null;
+      if (avatarEl?.src) {
+        return avatarEl.src.startsWith('//') ? 'https:' + avatarEl.src : avatarEl.src;
+      }
+      // 原有模式
+      return readAvatarUrlFromEl(document.querySelector('img[src*="avatar.php"]')) ||
+        readAvatarUrlFromEl(document.querySelector('img[alt="头像"]')) ||
+        readAvatarUrlFromEl(document.querySelector('[class*="avatar"] img')) ||
+        undefined;
+    };
     const shouldWaitForDom =
       !!document.querySelector('#homeBaseVar') ||
       !!document.querySelector('.name') ||
