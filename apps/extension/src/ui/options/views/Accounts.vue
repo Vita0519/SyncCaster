@@ -2,6 +2,31 @@
   <div class="accounts-page">
     <h2 class="page-title" :class="isDark ? 'text-gray-100' : 'text-gray-800'">账号管理</h2>
 
+    <!-- 开发测试工具栏 -->
+    <section class="section dev-toolbar">
+      <div class="section-header">
+        <span class="section-title">🔧 开发测试工具</span>
+      </div>
+      <div class="dev-buttons">
+        <n-button 
+          type="error"
+          size="small"
+          :loading="deletingAll"
+          @click="deleteAllAccounts"
+        >
+          一键删除所有账号
+        </n-button>
+        <n-button 
+          type="primary"
+          size="small"
+          :loading="addingAll"
+          @click="addAllAccounts"
+        >
+          一键检测并添加账号
+        </n-button>
+      </div>
+    </section>
+
     <!-- 已绑定账号模块 -->
     <section class="section">
       <div class="section-header">
@@ -131,6 +156,8 @@ const accounts = ref<Account[]>([]);
 const reloginLoadingMap = reactive<Record<string, boolean>>({});
 const loginLoadingMap = reactive<Record<string, boolean>>({});
 const refreshingAll = ref(false);
+const deletingAll = ref(false);
+const addingAll = ref(false);
 
 const platforms = [
   { id: 'juejin', name: '掘金' },
@@ -517,6 +544,96 @@ async function loginPlatform(platformId: string) {
   }
 }
 
+/**
+ * 一键删除所有账号（开发测试用）
+ */
+async function deleteAllAccounts() {
+  deletingAll.value = true;
+  const loadingMsg = message.loading('正在删除所有账号...', { duration: 0 });
+  
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: 'DELETE_ALL_ACCOUNTS',
+    });
+    
+    loadingMsg.destroy();
+    
+    if (result.success) {
+      message.success(`已删除 ${result.deletedCount || 0} 个账号`);
+      await loadAccounts();
+    } else {
+      message.error(result.error || '删除失败');
+    }
+  } catch (error: any) {
+    loadingMsg.destroy();
+    message.error('删除失败: ' + error.message);
+  } finally {
+    deletingAll.value = false;
+  }
+}
+
+/**
+ * 一键检测并添加所有已登录平台的账号（开发测试用）
+ */
+async function addAllAccounts() {
+  addingAll.value = true;
+  const loadingMsg = message.loading('正在检测所有平台登录状态...', { duration: 0 });
+  
+  try {
+    // 并行检测所有平台的登录状态
+    const results = await Promise.all(
+      platforms.map(async (platform) => {
+        try {
+          const result = await chrome.runtime.sendMessage({
+            type: 'FETCH_PLATFORM_USER_INFO',
+            data: { platform: platform.id },
+          });
+          return { platform: platform.id, name: platform.name, result };
+        } catch (e) {
+          return { platform: platform.id, name: platform.name, result: { success: false } };
+        }
+      })
+    );
+
+    // 对已登录的平台添加账号
+    const boundPlatforms: string[] = [];
+    const failedPlatforms: string[] = [];
+    
+    for (const { platform, name, result } of results) {
+      if (result.success && result.info?.loggedIn) {
+        try {
+          await chrome.runtime.sendMessage({
+            type: 'QUICK_ADD_ACCOUNT',
+            data: { platform },
+          });
+          boundPlatforms.push(name);
+        } catch (e) {
+          failedPlatforms.push(name);
+        }
+      }
+    }
+
+    loadingMsg.destroy();
+
+    if (boundPlatforms.length > 0) {
+      message.success(`已添加 ${boundPlatforms.length} 个账号：${boundPlatforms.join('、')}`);
+    } else {
+      message.info('未检测到已登录的平台');
+    }
+    
+    if (failedPlatforms.length > 0) {
+      message.warning(`以下平台添加失败：${failedPlatforms.join('、')}`);
+    }
+
+    await loadAccounts();
+  } catch (error: any) {
+    loadingMsg.destroy();
+    message.error('检测失败: ' + error.message);
+  } finally {
+    addingAll.value = false;
+  }
+}
+
 async function refreshAllAccounts() {
   if (accounts.value.length === 0) return;
   
@@ -762,5 +879,29 @@ async function refreshAllAccounts() {
 .platform-name {
   font-size: 14px;
   font-weight: 500;
+}
+
+/* 开发测试工具栏 */
+.dev-toolbar {
+  background: linear-gradient(135deg, rgba(255, 193, 7, 0.1), rgba(255, 152, 0, 0.1));
+  border: 1px dashed rgba(255, 152, 0, 0.4);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.dev-toolbar .section-header {
+  border-bottom: none;
+  padding-bottom: 0;
+  margin-bottom: 8px;
+}
+
+.dev-toolbar .section-title {
+  color: #f59e0b;
+}
+
+.dev-buttons {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 </style>

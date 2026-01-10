@@ -286,6 +286,19 @@ async function handleMessage(message: any, sender: chrome.runtime.MessageSender)
         return { success: false, error: error.message };
       }
 
+    case 'DELETE_ALL_ACCOUNTS':
+      // 一键删除所有账号（开发测试用）
+      logger.info('account', 'Deleting all accounts');
+      try {
+        const count = await db.accounts.count();
+        await db.accounts.clear();
+        logger.info('account', 'All accounts deleted', { count });
+        return { success: true, deletedCount: count };
+      } catch (error: any) {
+        logger.error('account', 'Failed to delete all accounts', { error });
+        return { success: false, error: error.message };
+      }
+
     case 'CHECK_ACCOUNT_AUTH':
       // 检查账号认证状态
       try {

@@ -819,21 +819,26 @@ const csdnApi: PlatformApiConfig = {
 
         let avatar: string | undefined;
         // 对标 COSE：CSDN 头像可能在 i-avatar.csdnimg.cn 或 profile-avatar.csdnimg.cn 域名
-        const avatarPatterns = [
-          /<div[^>]*class="[^"]*user-profile-avatar[^"]*"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"/i,
-          /<img[^>]+src="([^"]*(?:i-avatar|profile-avatar)\.csdnimg\.cn[^"]+)"[^>]*>/i,
-          /<img[^>]+data-src="([^"]*(?:i-avatar|profile-avatar)\.csdnimg\.cn[^"]+)"[^>]*>/i,
-          /background-image:\s*url\(['"]?([^'")\s]+(?:i-avatar|profile-avatar)\.csdnimg\.cn[^'")\s]+)['"]?\)/i,
-          // COSE 使用的模式：https://i-avatar.csdnimg.cn/...
-          /https:\/\/i-avatar\.csdnimg\.cn\/[^"'\s!]+/i,
+        // 注意：COSE 使用的模式是直接匹配完整 URL，不需要捕获组
+        const avatarPatterns: Array<{ pattern: RegExp; useFullMatch?: boolean }> = [
+          { pattern: /<div[^>]*class="[^"]*user-profile-avatar[^"]*"[^>]*>[\s\S]*?<img[^>]*src="([^"]+)"/i },
+          { pattern: /<img[^>]+src="([^"]*(?:i-avatar|profile-avatar)\.csdnimg\.cn[^"]+)"[^>]*>/i },
+          { pattern: /<img[^>]+data-src="([^"]*(?:i-avatar|profile-avatar)\.csdnimg\.cn[^"]+)"[^>]*>/i },
+          { pattern: /background-image:\s*url\(['"]?([^'")\s]+(?:i-avatar|profile-avatar)\.csdnimg\.cn[^'")\s]+)['"]?\)/i },
+          // COSE 使用的模式：直接匹配完整 URL（无捕获组，使用 match[0]）
+          { pattern: /https:\/\/i-avatar\.csdnimg\.cn\/[^"'\s!<>]+/i, useFullMatch: true },
+          { pattern: /https:\/\/profile-avatar\.csdnimg\.cn\/[^"'\s!<>]+/i, useFullMatch: true },
         ];
 
-        for (const pattern of avatarPatterns) {
+        for (const { pattern, useFullMatch } of avatarPatterns) {
           const match = scopeHtml.match(pattern) || html.match(pattern);
-          const value = normalizeUrl(match?.[1]);
+          // 对于无捕获组的模式，使用 match[0]；否则使用 match[1]
+          const rawValue = useFullMatch ? match?.[0] : match?.[1];
+          const value = normalizeUrl(rawValue);
           if (!value) continue;
           if (value.toLowerCase().includes('default') || value.toLowerCase().includes('placeholder')) continue;
           avatar = value;
+          logger.info('csdn', '从 HTML 提取到头像', { avatar: value.substring(0, 80) });
           break;
         }
 

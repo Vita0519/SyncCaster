@@ -247,7 +247,9 @@ const juejinDetector: PlatformAuthDetector = {
      const getAvatarFromDom = () =>
        readAvatarUrlFromEl(document.querySelector('.user-profile-avatar img')) ||
        readAvatarUrlFromEl(document.querySelector('.user-profile-avatar')) ||
-      readAvatarUrlFromEl(document.querySelector('img[src*="profile-avatar.csdnimg.cn"]')) ||
+       // 对标 COSE：CSDN 头像可能在 i-avatar.csdnimg.cn 或 profile-avatar.csdnimg.cn 域名
+       readAvatarUrlFromEl(document.querySelector('img[src*="i-avatar.csdnimg.cn"]')) ||
+       readAvatarUrlFromEl(document.querySelector('img[src*="profile-avatar.csdnimg.cn"]')) ||
        readAvatarUrlFromEl(document.querySelector('[class*="user-profile"][class*="avatar"]'));
 
      const getReliableNicknameFromDom = () => {
