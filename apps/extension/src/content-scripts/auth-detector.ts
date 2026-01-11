@@ -1523,7 +1523,12 @@ const segmentfaultDetector: PlatformAuthDetector = {
         if (!source) continue;
         
         // 尝试从不同路径获取用户信息
+        // 关键路径：思否使用 global.sessionUser.user 存储当前登录用户信息
         const userPaths = [
+          // 思否关键路径：sessionUser.user（cose 项目使用的路径）
+          source.global?.sessionUser?.user,
+          source.global?.sessionUser,
+          // 其他可能的路径
           source.currentUser,
           source.auth?.user,
           source.auth?.currentUser,

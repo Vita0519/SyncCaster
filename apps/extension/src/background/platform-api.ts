@@ -1352,6 +1352,7 @@ const bilibiliApi: PlatformApiConfig = {
 };
 
 // 简书 - 优先使用 API，失败时使用 Cookie 检测
+// 对标 cose 项目：使用 /author/current_user API 获取用户信息
 const jianshuApi: PlatformApiConfig = {
   id: 'jianshu',
   name: '简书',
@@ -1396,7 +1397,46 @@ const jianshuApi: PlatformApiConfig = {
       return { userId: slug, nickname, avatar };
     };
 
-    // 先尝试 API
+    // 先尝试 cose 项目使用的 API（/author/current_user）
+    try {
+      const res = await fetchWithCookies('https://www.jianshu.com/author/current_user', {
+        headers: {
+          'Accept': 'application/json',
+          'Referer': 'https://www.jianshu.com/',
+        },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        // cose 项目的检测逻辑：response?.id 存在即为已登录
+        // 用户信息：nickname 和 avatar
+        if (data?.id) {
+          // 简书用户主页格式为 https://www.jianshu.com/u/{slug}
+          // slug 是类似 bb8f42a96b80 的字符串，不是数字 id
+          const userId =
+            (typeof data.slug === 'string' && data.slug.trim().length > 0 ? data.slug.trim() : undefined);
+          const nickname = data.nickname;
+          const avatar = data.avatar;
+          logger.info('jianshu', '/author/current_user API 成功', { userId, slug: data.slug, id: data.id, nickname });
+          return {
+            loggedIn: true,
+            platform: 'jianshu',
+            userId: userId,
+            nickname: nickname,
+            avatar: avatar,
+            meta: {
+              followersCount: data.followers_count,
+              articlesCount: data.public_notes_count,
+            },
+            detectionMethod: 'api',
+          };
+        }
+      }
+    } catch (e: any) {
+      logger.warn('jianshu', '/author/current_user API 调用失败', { error: e.message });
+    }
+
+    // 备用 API：/shakespeare/v2/user/info
     try {
       const res = await fetchWithCookies('https://www.jianshu.com/shakespeare/v2/user/info', {
         headers: {
@@ -1409,15 +1449,12 @@ const jianshuApi: PlatformApiConfig = {
         const data = await res.json();
         const payload = data?.data || data?.result || data;
         if (payload?.id) {
-          // 简书用户主页格式为 https://www.jianshu.com/u/{slug}
-          // slug 是类似 bb8f42a96b80 的字符串，不是数字 id
-          // 必须使用 slug，不能使用数字 id
           const userId =
             (typeof payload.slug === 'string' && payload.slug.trim().length > 0 ? payload.slug.trim() : undefined) ||
             (typeof payload.user?.slug === 'string' && payload.user.slug.trim().length > 0 ? payload.user.slug.trim() : undefined);
           const nickname = payload.nickname || payload.user?.nickname || payload.user?.name;
           const avatar = payload.avatar || payload.user?.avatar;
-          logger.info('jianshu', 'API 成功', { userId, slug: payload.slug, id: payload.id });
+          logger.info('jianshu', '/shakespeare/v2/user/info API 成功', { userId, slug: payload.slug, id: payload.id, nickname });
           return {
             loggedIn: true,
             platform: 'jianshu',
@@ -1428,11 +1465,12 @@ const jianshuApi: PlatformApiConfig = {
               followersCount: payload.followers_count,
               articlesCount: payload.public_notes_count,
             },
+            detectionMethod: 'api',
           };
         }
       }
     } catch (e: any) {
-      logger.warn('jianshu', 'API 调用失败', { error: e.message });
+      logger.warn('jianshu', '/shakespeare/v2/user/info API 调用失败', { error: e.message });
     }
 
     // API 失败，使用 Cookie 检测
@@ -2261,13 +2299,42 @@ const tencentCloudApi: PlatformApiConfig = {
       return trimmed;
     };
 
+    const decodeEmbeddedString = (value?: unknown): string | undefined => {
+      if (typeof value !== 'string') return undefined;
+      let trimmed = value.trim();
+      if (!trimmed || trimmed === '[object Object]') return undefined;
+      trimmed = trimmed
+        .replace(/\\u002F/gi, '/')
+        .replace(/\\\//g, '/')
+        .replace(/\\u003A/gi, ':')
+        .replace(/\\u0026/gi, '&')
+        .replace(/\\u003D/gi, '=')
+        .replace(/\\u003F/gi, '?')
+        .replace(/\\u0025/gi, '%')
+        .replace(/&amp;/gi, '&')
+        .trim();
+      return trimmed || undefined;
+    };
+
+    const cleanNickname = (value?: unknown): string | undefined => {
+      const decoded = decodeEmbeddedString(value);
+      if (!decoded) return undefined;
+      const trimmed = decoded.trim();
+      if (!trimmed) return undefined;
+      if (trimmed.length > 80) return undefined;
+      if (/腾讯云开发者社区|个人中心|创作中心|开发者社区/i.test(trimmed) && trimmed.length <= 16) return undefined;
+      return trimmed;
+    };
+
     const isLikelyAvatarUrl = (url?: string): boolean => {
       if (!url) return false;
       const lower = url.trim().toLowerCase();
       if (!lower.startsWith('http')) return false;
-      if (lower.includes('favicon') || lower.includes('logo') || lower.includes('sprite')) return false;
+      if (lower.includes('favicon') || lower.includes('sprite')) return false;
       if (lower.includes('loading') || lower.includes('placeholder') || lower.includes('default')) return false;
       if (/(avatar|portrait|head|user|profile|qlogo|thirdqq|qpic)/i.test(lower)) return true;
+      // 避免误杀 QQ 头像域名 *.qlogo.cn
+      if (lower.includes('logo')) return false;
       return /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(lower);
     };
 
@@ -2366,6 +2433,8 @@ const tencentCloudApi: PlatformApiConfig = {
 
       const tryParseProfileFromHtml = async (): Promise<Pick<UserInfo, 'nickname' | 'avatar' | 'userId'> | null> => {
         const endpoints = [
+          // 对标 COSE：创作中心页面稳定包含当前用户信息（含头像）
+          'https://cloud.tencent.com/developer/creator',
           'https://cloud.tencent.com/developer/user',
           'https://cloud.tencent.com/developer/user/info',
         ];
@@ -2387,8 +2456,42 @@ const tencentCloudApi: PlatformApiConfig = {
 
             const finalUrl = res.url || url;
             if (finalUrl.includes('login') || finalUrl.includes('passport')) continue;
+            // COSE 经验：未登录访问 /developer/creator 常会被重定向到其它页面
+            if (url.includes('/developer/creator') && !finalUrl.includes('/developer/creator')) continue;
 
             const html = await res.text();
+            const scope = html.substring(0, 200000);
+
+            // 对标 COSE：使用更宽松的正则匹配用户昵称
+            // COSE 使用 [\s\S]*? 非贪婪匹配，不限制字符数
+            const regexNickname =
+              scope.match(/"userInfo"[\s\S]*?"nickname"\s*:\s*"([^"\\]{1,80})"/i)?.[1] ||
+              scope.match(/"creatorInfo"[\s\S]*?"nickname"\s*:\s*"([^"\\]{1,80})"/i)?.[1] ||
+              scope.match(/"currentUser"[\s\S]*?"nickname"\s*:\s*"([^"\\]{1,80})"/i)?.[1] ||
+              scope.match(/"isCreator"\s*:\s*true[\s\S]*?"nickname"\s*:\s*"([^"\\]{1,80})"/i)?.[1];
+
+            // 对标 COSE：使用更宽松的正则匹配头像 URL
+            // COSE 使用 [\s\S]*? 非贪婪匹配，不限制字符数
+            const regexAvatar =
+              scope.match(/"userInfo"[\s\S]*?"avatarUrl"\s*:\s*"([^"]+)"/i)?.[1] ||
+              scope.match(/"creatorInfo"[\s\S]*?"avatarUrl"\s*:\s*"([^"]+)"/i)?.[1] ||
+              scope.match(/"currentUser"[\s\S]*?"avatarUrl"\s*:\s*"([^"]+)"/i)?.[1] ||
+              scope.match(/"userInfo"[\s\S]*?"avatar"\s*:\s*"([^"]+)"/i)?.[1] ||
+              scope.match(/"avatarUrl"\s*:\s*"([^"]+)"/i)?.[1] ||
+              // COSE 备用方案：直接匹配任何 avatar 字段的 https URL
+              scope.match(/"avatar"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1];
+
+            const regexUserId =
+              scope.match(/"uin"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
+              scope.match(/"uid"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
+              scope.match(/"userId"\s*:\s*"?(\d{3,24})"?/i)?.[1];
+
+            const quickNickname = cleanNickname(regexNickname);
+            const quickAvatar = normalizeUrl(decodeEmbeddedString(regexAvatar));
+            const quickUserId = regexUserId ? String(regexUserId).trim() : undefined;
+            if (quickNickname || quickAvatar || quickUserId) {
+              return { nickname: quickNickname, avatar: quickAvatar, userId: quickUserId };
+            }
 
             // 常见信息会以 JSON 形式内嵌（字段名不稳定，做多候选）。
             const jsonCandidates: any[] = [];
@@ -3542,6 +3645,10 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
       if (!state) continue;
       // 只从“当前登录用户”相关字段中提取，避免误抓页面内容中的其他用户（如文章作者）
       const candidates = [
+        // 思否关键路径：sessionUser.user（cose 项目使用的路径）
+        state.global?.sessionUser?.user,
+        state.global?.sessionUser,
+        // 其他可能的路径
         state.currentUser,
         state.auth?.user,
         state.auth?.currentUser,
@@ -3559,11 +3666,16 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     }
 
     // 2. 尝试从 __NEXT_DATA__ 中提取（Next.js 页面）
+    // 关键路径：思否使用 initialState.global.sessionUser.user 存储当前登录用户信息
     const nextDataMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
     if (nextDataMatch?.[1]) {
       try {
         const nextData = JSON.parse(nextDataMatch[1]);
         const candidates = [
+          // 思否关键路径：sessionUser.user（cose 项目使用的路径）
+          nextData?.props?.pageProps?.initialState?.global?.sessionUser?.user,
+          nextData?.props?.pageProps?.initialState?.global?.sessionUser,
+          // 其他可能的路径
           nextData?.props?.pageProps?.currentUser,
           nextData?.props?.pageProps?.auth?.user,
           nextData?.props?.pageProps?.auth?.currentUser,
@@ -3571,6 +3683,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
           nextData?.props?.pageProps?.initialState?.auth?.user,
           nextData?.props?.pageProps?.initialState?.auth?.currentUser,
           nextData?.props?.pageProps?.initialState?.global?.currentUser,
+          nextData?.props?.pageProps?.initialState?.global?.user,
           nextData?.props?.pageProps?.initialState?.state?.auth?.user,
           nextData?.props?.pageProps?.initialState?.state?.currentUser,
         ].filter(Boolean);
@@ -4066,10 +4179,10 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     // 思否页面可能同时包含登录入口 DOM（用于未登录渲染/埋点），但只要出现“用户菜单”强标识，就应忽略登录入口的干扰
     const hasLoginButton = hasStrongUserMenuMarker && userId ? false : hasLoginButtonRaw;
 
-    // settings 页：只要能取到当前用户 slug 即可推断已登录
-    // 原因：settings 页面只有登录用户才能访问，能成功获取 HTML 并提取到 userId 就说明已登录
-    if (sourceLabel === 'settings' && userId) {
-      logger.info('segmentfault', '从 settings 页面推断已登录', { userId, nickname, avatar: !!avatar });
+    // settings/write 页：只要能取到当前用户 slug 即可推断已登录
+    // 原因：settings/write 页面只有登录用户才能访问，能成功获取 HTML 并提取到 userId 就说明已登录
+    if ((sourceLabel === 'settings' || sourceLabel === 'write') && userId) {
+      logger.info('segmentfault', `从 ${sourceLabel} 页面推断已登录`, { userId, nickname, avatar: !!avatar });
       return {
         loggedIn: true,
         platform: 'segmentfault',
@@ -4111,11 +4224,84 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
     };
   };
 
+  // 辅助函数：从 /write 页面的 __NEXT_DATA__ 提取用户信息（对标 cose 项目）
+  const parseWritePageNextData = (html: string): UserInfo | null => {
+    const nextDataMatch = html.match(/<script\s+id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/i);
+    if (!nextDataMatch?.[1]) {
+      logger.info('segmentfault', '/write 页面未找到 __NEXT_DATA__');
+      return null;
+    }
+
+    try {
+      const nextData = JSON.parse(nextDataMatch[1]);
+      // cose 项目使用的路径：props.pageProps.initialState.global.sessionUser.user
+      const sessionUser = nextData?.props?.pageProps?.initialState?.global?.sessionUser?.user;
+      
+      if (sessionUser && sessionUser.name) {
+        const username = sessionUser.name;
+        const avatar = sessionUser.avatar_url || '';
+        
+        logger.info('segmentfault', '从 /write 页面 __NEXT_DATA__ 提取到用户信息', { 
+          username, 
+          avatar: avatar ? avatar.substring(0, 50) : '无' 
+        });
+        
+        return {
+          loggedIn: true,
+          platform: 'segmentfault',
+          userId: sessionUser.slug || username,
+          nickname: username,
+          avatar: avatar.startsWith('//') ? `https:${avatar}` : avatar,
+          detectionMethod: 'html',
+        };
+      }
+      
+      logger.info('segmentfault', '/write 页面 __NEXT_DATA__ 中未找到 sessionUser.user');
+      return null;
+    } catch (e) {
+      logger.warn('segmentfault', '解析 /write 页面 __NEXT_DATA__ 失败', { error: (e as Error).message });
+      return null;
+    }
+  };
+
   try {
-    const settingsResult = await fetchHtml('https://segmentfault.com/user/settings');
+    // 方法1: 优先使用 /write 页面（对标 cose 项目，最可靠）
+    // cose 项目使用 userInfoUrl: 'https://segmentfault.com/write'
+    const writeResult = await fetchHtml('https://segmentfault.com/write');
     let loggedOutResult: UserInfo | null = null;
 
-    if (settingsResult.redirectedToLogin) {
+    if (writeResult.redirectedToLogin) {
+      loggedOutResult = {
+        loggedIn: false,
+        platform: 'segmentfault',
+        error: '需要登录',
+        errorType: AuthErrorType.LOGGED_OUT,
+        retryable: false,
+        detectionMethod: 'html',
+      };
+    }
+
+    if (writeResult.html) {
+      // 首先尝试 cose 的方法：从 __NEXT_DATA__ 提取
+      const nextDataResult = parseWritePageNextData(writeResult.html);
+      if (nextDataResult?.loggedIn) {
+        return nextDataResult;
+      }
+      
+      // 如果 __NEXT_DATA__ 方法失败，使用通用解析
+      const parsed = await parseHtml(writeResult.html, 'write');
+      if (parsed.loggedIn) return parsed;
+      if (!loggedOutResult && parsed.errorType === AuthErrorType.LOGGED_OUT) {
+        loggedOutResult = parsed;
+      }
+    } else if (writeResult.error) {
+      logger.warn('segmentfault', 'HTML 获取失败（write）', { error: writeResult.error });
+    }
+
+    // 方法2: 备用 - 使用 settings 页面
+    const settingsResult = await fetchHtml('https://segmentfault.com/user/settings');
+
+    if (settingsResult.redirectedToLogin && !loggedOutResult) {
       loggedOutResult = {
         loggedIn: false,
         platform: 'segmentfault',
@@ -4136,6 +4322,7 @@ async function fetchSegmentfaultUserFromHtml(): Promise<UserInfo> {
       logger.warn('segmentfault', 'HTML 获取失败（settings）', { error: settingsResult.error });
     }
 
+    // 方法3: 备用 - 使用首页
     const homeResult = await fetchHtml('https://segmentfault.com/');
     if (homeResult.html) {
       const parsed = await parseHtml(homeResult.html, 'home');
