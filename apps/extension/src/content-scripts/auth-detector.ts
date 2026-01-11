@@ -2603,6 +2603,286 @@ const oschinaDetector: PlatformAuthDetector = {
 };
 
 // ============================================================
+// 今日头条（头条号）检测器 - API 优先
+// 头条号网站特点：
+// 1. 创作者平台入口：https://mp.toutiao.com/
+// 2. 登录后可通过 API 获取媒体信息
+// 3. API: https://mp.toutiao.com/mp/agw/media/get_media_info
+// 4. 参考 cose 项目实现
+// ============================================================
+const toutiaoDetector: PlatformAuthDetector = {
+  id: 'toutiao',
+  urlPatterns: [/mp\.toutiao\.com/, /toutiao\.com/],
+  async checkLogin(): Promise<LoginState> {
+    log('toutiao', '检测登录状态...');
+
+    // 优先使用头条号 API
+    try {
+      const res = await fetch('https://mp.toutiao.com/mp/agw/media/get_media_info', {
+        credentials: 'include',
+        headers: {
+          'Accept': 'application/json',
+          'Referer': 'https://mp.toutiao.com/',
+        },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        log('toutiao', '头条号 API 响应', data);
+
+        // 检查登录状态：err_no === 0 且存在 media 信息
+        if (data.err_no === 0 && data.data?.media) {
+          const media = data.data.media;
+          log('toutiao', '从 API 获取到用户信息', { 
+            nickname: media.display_name,
+            mediaId: media.media_id 
+          });
+          return {
+            loggedIn: true,
+            platform: 'toutiao',
+            userId: String(media.media_id || media.id || ''),
+            nickname: media.display_name || media.name || '头条号用户',
+            avatar: media.https_avatar_url || media.avatar_url || media.avatar,
+          };
+        }
+
+        // err_no 不为 0 表示未登录
+        if (data.err_no !== 0) {
+          log('toutiao', '头条号 API 返回未登录', { err_no: data.err_no });
+          return { loggedIn: false, platform: 'toutiao' };
+        }
+      }
+    } catch (e) {
+      log('toutiao', 'API 调用失败，尝试其他方式', e);
+    }
+
+    // 回退：使用 background 检测
+    const bg = await fetchPlatformInfoFromBackground('toutiao');
+    if (bg?.loggedIn) {
+      return bg;
+    }
+
+    // 检查页面是否有登录相关元素
+    const loginBtn = document.querySelector('[class*="login"], [class*="Login"]');
+    if (loginBtn?.textContent?.includes('登录')) {
+      return { loggedIn: false, platform: 'toutiao' };
+    }
+
+    log('toutiao', '未检测到明确的登录状态');
+    return { loggedIn: false, platform: 'toutiao' };
+  },
+};
+
+// ============================================================
+// InfoQ 检测器 - 对标 cose 项目
+// 1. 写作台域名：xie.infoq.cn
+// 2. 主站域名：www.infoq.cn / infoq.cn
+// 3. API: https://xie.infoq.cn/public/v1/user/get_user (POST)
+// 4. 参考 cose 项目：code === 0 且有 nickname 表示已登录
+// ============================================================
+const infoqDetector: PlatformAuthDetector = {
+  id: 'infoq',
+  urlPatterns: [/infoq\.cn/],
+  async checkLogin(): Promise<LoginState> {
+    log('infoq', '检测登录状态...');
+
+    // 优先使用写作台 API（对标 cose 项目）
+    try {
+      const res = await fetch('https://xie.infoq.cn/public/v1/user/get_user', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'Referer': 'https://xie.infoq.cn/',
+        },
+        body: JSON.stringify({}),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        log('infoq', '写作台 API 响应', data);
+
+        // cose 的检测逻辑：code === 0 且有 nickname
+        if (data && data.code === 0 && data.data && data.data.nickname) {
+          const user = data.data;
+          log('infoq', '从 API 获取到用户信息', { 
+            nickname: user.nickname,
+            uid: user.uid 
+          });
+          return {
+            loggedIn: true,
+            platform: 'infoq',
+            userId: String(user.uid || user.id || ''),
+            nickname: user.nickname || 'InfoQ用户',
+            avatar: user.avatar || '',
+          };
+        }
+
+        // code 不为 0 或没有 nickname 表示未登录
+        log('infoq', 'API 返回未登录', { code: data.code });
+      }
+    } catch (e) {
+      log('infoq', '写作台 API 调用失败，尝试其他方式', e);
+    }
+
+    // 备用：尝试主站 API
+    try {
+      const res = await fetch('https://www.infoq.cn/public/v1/user/info', {
+        credentials: 'include',
+        headers: {
+          'Accept': 'application/json',
+          'Referer': 'https://www.infoq.cn/',
+        },
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        log('infoq', '主站 API 响应', data);
+
+        const user = data.data || data;
+        if (user && (user.uid || user.id || user.userId)) {
+          return {
+            loggedIn: true,
+            platform: 'infoq',
+            userId: String(user.uid || user.id || user.userId),
+            nickname: user.nickname || user.name || user.userName || 'InfoQ用户',
+            avatar: user.avatar || user.avatarUrl || '',
+          };
+        }
+      }
+    } catch (e) {
+      log('infoq', '主站 API 调用失败', e);
+    }
+
+    // 回退：使用 background 检测
+    const bg = await fetchPlatformInfoFromBackground('infoq');
+    if (bg?.loggedIn) {
+      return bg;
+    }
+
+    // 检查页面是否有登录相关元素
+    const loginBtn = document.querySelector('[class*="login"], [class*="Login"], .login-btn');
+    if (loginBtn?.textContent?.includes('登录')) {
+      return { loggedIn: false, platform: 'infoq' };
+    }
+
+    log('infoq', '未检测到明确的登录状态');
+    return { loggedIn: false, platform: 'infoq' };
+  },
+};
+
+// ============================================================
+// Medium 检测器 - 对齐 cose 项目
+// ============================================================
+const mediumDetector: PlatformAuthDetector = {
+  id: 'medium',
+  urlPatterns: [/medium\.com/],
+  async checkLogin(): Promise<LoginState> {
+    log('medium', '检测登录状态...');
+
+    // 优先使用 background 检测（可以访问 HttpOnly Cookie）
+    const bg = await fetchPlatformInfoFromBackground('medium');
+    if (bg) {
+      log('medium', 'background 检测结果', bg);
+      return bg;
+    }
+
+    // 回退：检查页面是否有登录相关元素
+    const url = window.location.href;
+
+    // 检查是否在登录页面
+    if (url.includes('/m/signin') || url.includes('?signIn') || url.includes('/m/callback')) {
+      return { loggedIn: false, platform: 'medium' };
+    }
+
+    // 检查页面是否有用户头像（已登录标志）
+    const userAvatar = document.querySelector('img[alt][src*="miro.medium.com"]');
+    if (userAvatar) {
+      // 尝试从页面提取用户名
+      const usernameMatch = document.body.innerHTML.match(/"username"\s*:\s*"([^"]+)"/) ||
+                            document.body.innerHTML.match(/medium\.com\/@([a-zA-Z0-9_]+)/);
+      const username = usernameMatch?.[1];
+      const avatar = (userAvatar as HTMLImageElement).src;
+
+      if (username && username !== 'medium' && username !== 'gmail') {
+        log('medium', '从 DOM 检测到已登录', { username });
+        return {
+          loggedIn: true,
+          platform: 'medium',
+          userId: username,
+          nickname: username,
+          avatar: avatar,
+        };
+      }
+    }
+
+    // 检查是否有登录按钮
+    const signInBtn = document.querySelector('a[href*="signin"], button[data-action="sign-in-prompt"]');
+    if (signInBtn) {
+      return { loggedIn: false, platform: 'medium' };
+    }
+
+    log('medium', '未检测到明确的登录状态，使用 background 结果');
+    return { loggedIn: false, platform: 'medium' };
+  },
+};
+
+// ============================================================
+// 网易号检测器 - 对齐 cose 项目
+// ============================================================
+const wangyihaoDetector: PlatformAuthDetector = {
+  id: 'wangyihao',
+  urlPatterns: [/mp\.163\.com/],
+  async checkLogin(): Promise<LoginState> {
+    log('wangyihao', '检测登录状态...');
+
+    // 优先使用 background 检测（navinfo.do API）
+    const bg = await fetchPlatformInfoFromBackground('wangyihao');
+    if (bg) {
+      log('wangyihao', 'background 检测结果', bg);
+      return bg;
+    }
+
+    // 回退：检查页面是否有登录相关元素
+    const loginBtn = document.querySelector('[class*="login"], .login-btn, a[href*="login"]');
+    if (loginBtn?.textContent?.includes('登录')) {
+      return { loggedIn: false, platform: 'wangyihao' };
+    }
+
+    log('wangyihao', '未检测到明确的登录状态');
+    return { loggedIn: false, platform: 'wangyihao' };
+  },
+};
+
+// ============================================================
+// 百家号检测器 - 对齐 cose 项目
+// ============================================================
+const baijiahaoDetector: PlatformAuthDetector = {
+  id: 'baijiahao',
+  urlPatterns: [/baijiahao\.baidu\.com/],
+  async checkLogin(): Promise<LoginState> {
+    log('baijiahao', '检测登录状态...');
+
+    // 优先使用 background 检测（appinfo API）
+    const bg = await fetchPlatformInfoFromBackground('baijiahao');
+    if (bg) {
+      log('baijiahao', 'background 检测结果', bg);
+      return bg;
+    }
+
+    // 回退：检查页面是否有登录相关元素
+    const loginBtn = document.querySelector('[class*="login"], .login-btn, a[href*="login"]');
+    if (loginBtn?.textContent?.includes('登录')) {
+      return { loggedIn: false, platform: 'baijiahao' };
+    }
+
+    log('baijiahao', '未检测到明确的登录状态');
+    return { loggedIn: false, platform: 'baijiahao' };
+  },
+};
+
+// ============================================================
 // 检测器注册表
 // ============================================================
 
@@ -2619,6 +2899,11 @@ const detectors: PlatformAuthDetector[] = [
   segmentfaultDetector,
   bilibiliDetector,
   oschinaDetector,
+  toutiaoDetector,
+  infoqDetector,
+  mediumDetector,
+  wangyihaoDetector,
+  baijiahaoDetector,
 ];
 
 /**

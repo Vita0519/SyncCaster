@@ -222,10 +222,10 @@ const platformUserUrls: Record<string, (userId?: string) => string> = {
   'segmentfault': (userId) => userId ? `https://segmentfault.com/u/${userId}` : 'https://segmentfault.com/user/settings',
   'bilibili': (userId) => userId ? `https://space.bilibili.com/${userId}` : 'https://member.bilibili.com/platform/home',
   'oschina': (userId) => userId ? `https://my.oschina.net/u/${userId}` : 'https://my.oschina.net/',
-  'toutiao': (userId) => userId ? `https://www.toutiao.com/c/user/token/${userId}/` : 'https://mp.toutiao.com/',
+  'toutiao': () => 'https://www.toutiao.com/',
   'infoq': (userId) => userId ? `https://www.infoq.cn/u/${userId}/` : 'https://www.infoq.cn/profile/',
   'baijiahao': (userId) => userId ? `https://author.baidu.com/home/${userId}` : 'https://baijiahao.baidu.com/',
-  'wangyihao': (userId) => userId ? `https://www.163.com/dy/media/${userId}.html` : 'https://mp.163.com/',
+  'wangyihao': () => 'https://www.163.com/',
   'medium': (userId) => userId ? `https://medium.com/@${userId}` : 'https://medium.com/me/stories/drafts',
 };
 

@@ -157,9 +157,11 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
     sessionCookies: ['slave_sid', 'slave_user', 'data_ticket', 'bizuin', 'data_bizuin', 'cert'],
   },
   'toutiao': {
-    url: 'https://www.toutiao.com/',
-    fallbackUrls: ['https://sso.toutiao.com/', 'https://mp.toutiao.com/'],
-    sessionCookies: ['toutiao_sso_user', 'passport_csrf_token', 'sid_guard', 'uid_tt', 'sid_tt', 'sessionid'],
+    // 头条号（创作者平台）使用 mp.toutiao.com 域名
+    url: 'https://mp.toutiao.com/',
+    fallbackUrls: ['https://sso.toutiao.com/', 'https://www.toutiao.com/'],
+    // 头条号的会话 Cookie
+    sessionCookies: ['sso_uid_tt', 'sso_uid_tt_ss', 'toutiao_sso_user', 'passport_csrf_token', 'sid_guard', 'uid_tt', 'sid_tt', 'sessionid', 'sid_ucp_v1'],
   },
   'infoq': {
     url: 'https://www.infoq.cn/',
@@ -179,7 +181,10 @@ export const COOKIE_CONFIGS: Record<string, CookieDetectionConfig> = {
   },
   'medium': {
     url: 'https://medium.com/',
-    sessionCookies: ['sid', 'uid', '_gid', 'nonce', 'sz'],
+    // Medium 使用 sid 和 uid HttpOnly cookies 进行身份验证
+    // 对齐 cose 项目：只使用 sid 和 uid 作为登录 Cookie
+    // _gid, nonce, sz 等 Cookie 即使未登录也可能存在，不能作为登录判断依据
+    sessionCookies: ['sid', 'uid'],
   },
 };
 
@@ -4862,7 +4867,8 @@ const oschinaApi: PlatformApiConfig = {
       }
     }
 
-    // 4. HTML 首页检测 - 仅用于判断登录状态，不提取用户信息
+    // 4. HTML 首页检测 - 判断登录状态并提取用户信息
+    // 对标 cose 项目：从首页导航栏提取用户名和头像
     try {
       const htmlRes = await fetchWithCookies('https://www.oschina.net/', {
         headers: {
@@ -4903,6 +4909,78 @@ const oschinaApi: PlatformApiConfig = {
           }
         }
 
+        // 对标 cose 项目：从首页 HTML 提取用户名
+        // cose 使用的模式：
+        // 1. <a class="user-name">用户名</a>
+        // 2. <span class="nick">用户名</span>
+        // 3. title="用户名" class="avatar"
+        // 4. class="avatar" title="用户名"
+        // 5. alt="用户名" class="avatar"
+        let htmlNickname: string | undefined;
+        const htmlNicknamePatterns = [
+          // cose 项目使用的模式
+          /<a[^>]*class="[^"]*user-name[^"]*"[^>]*>([^<]+)<\/a>/i,
+          /<span[^>]*class="[^"]*nick[^"]*"[^>]*>([^<]+)<\/span>/i,
+          /title="([^"]+)"[^>]*class="[^"]*avatar/i,
+          /class="[^"]*avatar[^"]*"[^>]*title="([^"]+)"/i,
+          /alt="([^"]+)"[^>]*class="[^"]*avatar/i,
+          // 额外的模式
+          /<a[^>]*class="[^"]*current-user-avatar[^"]*"[^>]*title="([^"]+)"/i,
+          /<img[^>]*class="[^"]*avatar[^"]*"[^>]*alt="([^"]+)"/i,
+          /<img[^>]*alt="([^"]+)"[^>]*class="[^"]*avatar[^"]*"/i,
+          // 用户下拉菜单中的用户名
+          /<div[^>]*class="[^"]*user-dropdown[^"]*"[^>]*>[\s\S]*?<span[^>]*class="[^"]*name[^"]*"[^>]*>([^<]+)<\/span>/i,
+          /<div[^>]*class="[^"]*user-menu[^"]*"[^>]*>[\s\S]*?<span[^>]*class="[^"]*name[^"]*"[^>]*>([^<]+)<\/span>/i,
+          // 导航栏用户信息
+          /<div[^>]*class="[^"]*header-user[^"]*"[^>]*>[\s\S]*?<span[^>]*>([^<]+)<\/span>/i,
+          /<li[^>]*class="[^"]*user-info[^"]*"[^>]*>[\s\S]*?<a[^>]*>([^<]+)<\/a>/i,
+        ];
+
+        for (const pattern of htmlNicknamePatterns) {
+          const match = headerHtml.match(pattern) || html.match(pattern);
+          if (match?.[1]) {
+            const value = match[1].trim();
+            // 验证是有效的用户名
+            if (value && value.length > 0 && value.length < 50 && !/^\d+$/.test(value) && !value.includes('登录') && !value.includes('注册')) {
+              htmlNickname = value;
+              logger.info('oschina', '从首页 HTML 提取到用户名', { nickname: htmlNickname, pattern: pattern.toString().substring(0, 60) });
+              break;
+            }
+          }
+        }
+
+        // 对标 cose 项目：从首页 HTML 提取头像
+        let htmlAvatar: string | undefined;
+        const htmlAvatarPatterns = [
+          // cose 项目使用的模式
+          /<img[^>]*src="([^"]+)"[^>]*class="[^"]*avatar/i,
+          /<img[^>]*class="[^"]*avatar[^"]*"[^>]*src="([^"]+)"/i,
+          // 额外的模式
+          /<a[^>]*class="[^"]*current-user-avatar[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i,
+          /<div[^>]*class="[^"]*user-avatar[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i,
+          /<div[^>]*class="[^"]*header-user[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i,
+        ];
+
+        for (const pattern of htmlAvatarPatterns) {
+          const match = headerHtml.match(pattern) || html.match(pattern);
+          if (match?.[1]) {
+            const rawUrl = match[1].trim();
+            const normalized = normalizeUrl(rawUrl);
+            // 过滤掉非头像图片（logo、icon、等级图标等）
+            if (normalized &&
+              !normalized.includes('logo') && !normalized.includes('icon') &&
+              !normalized.includes('favicon') && !normalized.includes('sprite') &&
+              !normalized.includes('loading') && !normalized.includes('placeholder') &&
+              !normalized.includes('default') && !normalized.includes('level') &&
+              !normalized.includes('lv') && !normalized.includes('badge') &&
+              !normalized.includes('rank') && !normalized.includes('grade')) {
+              htmlAvatar = normalized;
+              logger.info('oschina', '从首页 HTML 提取到头像', { avatar: htmlAvatar });
+              break;
+            }
+          }
+        }
+
         // 检查是否有用户下拉菜单（已登录标志）
         const hasUserDropdown = headerHtml.includes('user-dropdown') ||
           headerHtml.includes('user-menu') ||
@@ -4913,7 +4991,11 @@ const oschinaApi: PlatformApiConfig = {
           hasLoginBtn,
           hasLogoutBtn,
           loggedIn: hasLogoutBtn || hasUserDropdown,
-          userInfo: htmlUserId ? { userId: htmlUserId } : undefined
+          userInfo: (htmlUserId || htmlNickname || htmlAvatar) ? {
+            userId: htmlUserId,
+            nickname: htmlNickname,
+            avatar: htmlAvatar,
+          } : undefined
         };
 
         logger.info('oschina', 'HTML 解析结果', {
@@ -4921,6 +5003,8 @@ const oschinaApi: PlatformApiConfig = {
           hasLogoutBtn,
           hasUserDropdown,
           htmlUserId,
+          htmlNickname,
+          htmlAvatar: htmlAvatar ? '有' : '无',
           loggedIn: htmlResult.loggedIn
         });
       }
@@ -4983,20 +5067,20 @@ const oschinaApi: PlatformApiConfig = {
           loggedIn: true,
           platform: 'oschina',
           userId: cookieResult.userId || apiResult.userInfo?.userId || htmlResult.userInfo?.userId,
-          // 不从 HTML 提取昵称和头像，避免误抓
-          nickname: apiResult.userInfo?.nickname || '开源中国用户',
-          avatar: apiResult.userInfo?.avatar || undefined,
+          // 对标 cose 项目：优先使用 API 返回的用户信息，其次使用 HTML 提取的用户信息
+          nickname: apiResult.userInfo?.nickname || htmlResult.userInfo?.nickname || '开源中国用户',
+          avatar: apiResult.userInfo?.avatar || htmlResult.userInfo?.avatar || undefined,
           detectionMethod: apiResult.success && apiResult.loggedIn === true ? 'api' : 'cookie',
         };
       }
 
-      logger.info('oschina', 'HTML 有登录标志但无 Cookie/API 证据，按未登录处理（可重试）');
+      logger.info('oschina', 'HTML 检测到登录标志，信任 HTML 检测结果');
       return {
-        loggedIn: false,
+        loggedIn: true,
         platform: 'oschina',
-        errorType: AuthErrorType.API_ERROR,
-        error: '无法确认登录状态',
-        retryable: true,
+        userId: htmlResult.userInfo?.userId,
+        nickname: htmlResult.userInfo?.nickname || '开源中国用户',
+        avatar: htmlResult.userInfo?.avatar || undefined,
         detectionMethod: 'html',
       };
     }
@@ -5305,38 +5389,53 @@ const wechatApi: PlatformApiConfig = {
   },
 };
 
-// 今日头条 - 使用 Cookie 检测
+// 今日头条 - 使用头条号 API 检测
 const toutiaoApi: PlatformApiConfig = {
   id: 'toutiao',
   name: '今日头条',
   async fetchUserInfo(): Promise<UserInfo> {
     try {
-      // 尝试 API 获取用户信息
-      const res = await fetchWithCookies('https://www.toutiao.com/api/pc/user/info/', {
+      // 使用头条号（创作者平台）API 获取用户信息
+      // 参考 cose 项目：https://mp.toutiao.com/mp/agw/media/get_media_info
+      const res = await fetchWithCookies('https://mp.toutiao.com/mp/agw/media/get_media_info', {
         headers: {
           'Accept': 'application/json',
-          'Referer': 'https://www.toutiao.com/',
+          'Referer': 'https://mp.toutiao.com/',
         },
       });
 
       if (res.ok) {
         const data = await res.json();
-        logger.info('toutiao', 'API 响应', data);
+        logger.info('toutiao', '头条号 API 响应', data);
 
-        if (data.data && data.data.user_id) {
-          const user = data.data;
+        // 检查登录状态：err_no === 0 且存在 media 信息
+        if (data.err_no === 0 && data.data?.media) {
+          const media = data.data.media;
           return {
             loggedIn: true,
             platform: 'toutiao',
-            userId: String(user.user_id),
-            nickname: user.screen_name || user.name || '头条用户',
-            avatar: user.avatar_url || user.avatar,
+            userId: String(media.media_id || media.id || ''),
+            nickname: media.display_name || media.name || '头条号用户',
+            avatar: media.https_avatar_url || media.avatar_url || media.avatar,
+            detectionMethod: 'api',
+          };
+        }
+
+        // err_no 不为 0 表示未登录或其他错误
+        if (data.err_no !== 0) {
+          logger.info('toutiao', '头条号 API 返回错误', { err_no: data.err_no, err_tips: data.err_tips });
+          return {
+            loggedIn: false,
+            platform: 'toutiao',
+            error: data.err_tips || '未登录头条号',
+            errorType: AuthErrorType.LOGGED_OUT,
+            retryable: false,
             detectionMethod: 'api',
           };
         }
       }
     } catch (e: any) {
-      logger.warn('toutiao', 'API 调用失败', { error: e.message });
+      logger.warn('toutiao', '头条号 API 调用失败', { error: e.message });
     }
 
     // API 失败，使用 Cookie 检测
@@ -5344,13 +5443,47 @@ const toutiaoApi: PlatformApiConfig = {
   },
 };
 
-// InfoQ - 使用 Cookie 检测
+// InfoQ - 使用写作台 API 检测（对标 cose 项目）
+// cose 使用 https://xie.infoq.cn/public/v1/user/get_user (POST) 获取用户信息
 const infoqApi: PlatformApiConfig = {
   id: 'infoq',
   name: 'InfoQ',
   async fetchUserInfo(): Promise<UserInfo> {
+    // 优先使用写作台 API（xie.infoq.cn），这是 cose 项目使用的方式
     try {
-      // 尝试 API 获取用户信息
+      const res = await fetchWithCookies('https://xie.infoq.cn/public/v1/user/get_user', {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'Referer': 'https://xie.infoq.cn/',
+        },
+        body: JSON.stringify({}),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        logger.info('infoq', '写作台 API 响应', data);
+
+        // cose 的检测逻辑：code === 0 且有 nickname
+        if (data && data.code === 0 && data.data && data.data.nickname) {
+          const user = data.data;
+          return {
+            loggedIn: true,
+            platform: 'infoq',
+            userId: String(user.uid || user.id || ''),
+            nickname: user.nickname || 'InfoQ用户',
+            avatar: user.avatar || '',
+            detectionMethod: 'api',
+          };
+        }
+      }
+    } catch (e: any) {
+      logger.warn('infoq', '写作台 API 调用失败', { error: e.message });
+    }
+
+    // 备用：尝试主站 API
+    try {
       const res = await fetchWithCookies('https://www.infoq.cn/public/v1/user/info', {
         headers: {
           'Accept': 'application/json',
@@ -5360,7 +5493,7 @@ const infoqApi: PlatformApiConfig = {
 
       if (res.ok) {
         const data = await res.json();
-        logger.info('infoq', 'API 响应', data);
+        logger.info('infoq', '主站 API 响应', data);
 
         const user = data.data || data;
         if (user && (user.uid || user.id || user.userId)) {
@@ -5375,10 +5508,10 @@ const infoqApi: PlatformApiConfig = {
         }
       }
     } catch (e: any) {
-      logger.warn('infoq', 'API 调用失败', { error: e.message });
+      logger.warn('infoq', '主站 API 调用失败', { error: e.message });
     }
 
-    // API 失败，使用 Cookie 检测
+    // API 都失败，使用 Cookie 检测
     return detectViaCookies('infoq');
   },
 };
@@ -5524,14 +5657,16 @@ const baijiahaoApi: PlatformApiConfig = {
   },
 };
 
-// 网易号 - 使用 Cookie 检测
+// 网易号 - 使用 navinfo.do API 检测（对标 cose 项目）
 const wangyihaoApi: PlatformApiConfig = {
   id: 'wangyihao',
   name: '网易号',
   async fetchUserInfo(): Promise<UserInfo> {
     try {
-      // 尝试从网易号后台 API 获取用户信息
-      const res = await fetchWithCookies('https://mp.163.com/api/user/info', {
+      // 使用 navinfo.do API 获取用户信息（对标 cose 项目）
+      // 添加时间戳防止缓存
+      const timestamp = Date.now();
+      const res = await fetchWithCookies(`https://mp.163.com/wemedia/navinfo.do?_=${timestamp}`, {
         headers: {
           'Accept': 'application/json',
           'Referer': 'https://mp.163.com/',
@@ -5540,72 +5675,149 @@ const wangyihaoApi: PlatformApiConfig = {
 
       if (res.ok) {
         const data = await res.json();
-        logger.info('wangyihao', 'API 响应', data);
+        logger.info('wangyihao', 'navinfo.do API 响应', data);
 
-        if (data.code === 200 && data.data) {
+        // 对标 cose：code === 1 且 data.tname 存在表示已登录
+        if (data.code === 1 && data.data?.tname) {
           const user = data.data;
           return {
             loggedIn: true,
             platform: 'wangyihao',
-            userId: String(user.userId || user.id || user.uid),
-            nickname: user.nickname || user.name || '网易号用户',
-            avatar: user.avatar || user.headImgUrl,
+            userId: String(user.tid || user.id || user.uid || ''),
+            nickname: user.tname || '网易号用户',
+            avatar: user.icon || user.avatar || '',
+            detectionMethod: 'api',
+          };
+        } else {
+          logger.info('wangyihao', 'navinfo.do API 返回未登录状态', { code: data.code });
+          return {
+            loggedIn: false,
+            platform: 'wangyihao',
+            errorType: AuthErrorType.LOGGED_OUT,
+            error: '未登录',
             detectionMethod: 'api',
           };
         }
       }
     } catch (e: any) {
-      logger.warn('wangyihao', 'API 调用失败', { error: e.message });
+      logger.warn('wangyihao', 'navinfo.do API 调用失败', { error: e.message });
     }
 
-    // API 失败，使用 Cookie 检测
+    // API 失败，使用 Cookie 检测作为备用
     return detectViaCookies('wangyihao');
   },
 };
 
-// Medium - 使用 Cookie 检测
+// Medium - 对齐 cose 项目：先检查 Cookie，再访问 /me/stats 获取用户信息
 const mediumApi: PlatformApiConfig = {
   id: 'medium',
   name: 'Medium',
   async fetchUserInfo(): Promise<UserInfo> {
+    // 第一步：检查 sid 和 uid Cookie 是否存在
+    // Medium 使用 sid 和 uid HttpOnly cookies 进行身份验证
     try {
-      // 尝试从 Medium API 获取用户信息
-      const res = await fetchWithCookies('https://medium.com/_/api/users/me', {
+      const sidCookie = await chrome.cookies.get({
+        url: 'https://medium.com',
+        name: 'sid'
+      });
+      const uidCookie = await chrome.cookies.get({
+        url: 'https://medium.com',
+        name: 'uid'
+      });
+
+      // 如果没有 sid 或 uid cookie，说明未登录
+      if (!sidCookie && !uidCookie) {
+        logger.info('medium', '未找到登录 Cookie (sid/uid)');
+        return {
+          loggedIn: false,
+          platform: 'medium',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '未找到登录 Cookie',
+          retryable: false,
+          detectionMethod: 'cookie',
+        };
+      }
+
+      logger.info('medium', `找到登录 Cookie: sid=${!!sidCookie}, uid=${!!uidCookie}`);
+
+      // 第二步：访问 /me/stats 页面获取用户信息（对齐 cose 项目）
+      const res = await fetchWithCookies('https://medium.com/me/stats', {
         headers: {
-          'Accept': 'application/json',
+          'Accept': 'text/html,application/xhtml+xml',
           'Referer': 'https://medium.com/',
         },
       });
 
-      if (res.ok) {
-        const text = await res.text();
-        // Medium API 返回的 JSON 前面有 ])}while(1);</x> 前缀
-        const jsonStr = text.replace(/^\]\)\}while\(1\);<\/x>/, '');
-        try {
-          const data = JSON.parse(jsonStr);
-          logger.info('medium', 'API 响应', data);
+      const html = await res.text();
+      const finalUrl = res.url;
 
-          if (data.payload && data.payload.user) {
-            const user = data.payload.user;
-            return {
-              loggedIn: true,
-              platform: 'medium',
-              userId: user.username || user.userId,
-              nickname: user.name || user.username || 'Medium用户',
-              avatar: user.imageId ? `https://miro.medium.com/v2/resize:fill:176:176/${user.imageId}` : undefined,
-              detectionMethod: 'api',
-            };
-          }
-        } catch (parseErr) {
-          logger.warn('medium', 'API 响应解析失败', { error: (parseErr as Error).message });
-        }
+      // 检查是否被重定向到登录页（未登录标志）
+      if (finalUrl.includes('/m/signin') || finalUrl.includes('?signIn') || finalUrl.includes('/m/callback')) {
+        logger.info('medium', '被重定向到登录页，判定为未登录');
+        return {
+          loggedIn: false,
+          platform: 'medium',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '需要重新登录',
+          retryable: false,
+          detectionMethod: 'html',
+        };
       }
-    } catch (e: any) {
-      logger.warn('medium', 'API 调用失败', { error: e.message });
-    }
 
-    // API 失败，使用 Cookie 检测
-    return detectViaCookies('medium');
+      // 从页面提取用户名 - 优先使用 JSON 格式（对齐 cose 项目）
+      const profileMatch = html.match(/"username"\s*:\s*"([^"]+)"/) ||
+                           html.match(/href="https:\/\/medium\.com\/@([^"?\/]+)"/) ||
+                           html.match(/medium\.com\/@([a-zA-Z0-9_]+)/);
+
+      let username = '';
+      let avatar = '';
+
+      if (profileMatch && profileMatch[1] && profileMatch[1] !== 'gmail' && profileMatch[1] !== 'medium') {
+        username = profileMatch[1];
+
+        // 从页面提取头像 - 查找导航栏用户头像（对齐 cose 项目）
+        // Medium 的用户头像 img 标签的 alt 属性是用户名的简称
+        const shortName = username.replace(/\d+$/, ''); // 移除末尾数字
+        const avatarPattern = new RegExp(`<img[^>]*alt="${shortName}"[^>]*src="([^"]+)"`);
+        const avatarMatch = html.match(avatarPattern);
+
+        // 备用: src 在 alt 之前
+        const avatarPattern2 = new RegExp(`<img[^>]*src="([^"]+)"[^>]*alt="${shortName}"`);
+        const avatarMatch2 = html.match(avatarPattern2);
+
+        avatar = (avatarMatch && avatarMatch[1]) || (avatarMatch2 && avatarMatch2[1]) || '';
+
+        logger.info('medium', '从 /me/stats 页面获取到用户信息', { username, hasAvatar: !!avatar });
+        return {
+          loggedIn: true,
+          platform: 'medium',
+          userId: username,
+          nickname: username,
+          avatar: avatar || undefined,
+          detectionMethod: 'html',
+        };
+      }
+
+      // 有 Cookie 但无法提取用户名，仍然认为已登录（对齐 cose 项目）
+      logger.info('medium', '已登录但无法提取用户名');
+      return {
+        loggedIn: true,
+        platform: 'medium',
+        userId: uidCookie?.value,
+        nickname: 'Medium用户',
+        detectionMethod: 'cookie',
+      };
+    } catch (e: any) {
+      logger.warn('medium', '检测失败', { error: e.message });
+      return {
+        loggedIn: false,
+        platform: 'medium',
+        errorType: AuthErrorType.NETWORK_ERROR,
+        error: e.message,
+        retryable: true,
+        detectionMethod: 'api',
+      };
+    }
   },
 };
 

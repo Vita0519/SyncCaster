@@ -151,7 +151,7 @@ const PLATFORMS: Record<string, PlatformConfig> = {
     id: 'toutiao',
     name: '今日头条',
     loginUrl: 'https://mp.toutiao.com/',
-    homeUrl: 'https://mp.toutiao.com/',
+    homeUrl: 'https://www.toutiao.com/',
     urlPattern: /toutiao\.com/,
   },
   infoq: {

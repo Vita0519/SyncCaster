@@ -77,7 +77,7 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
       'clipboardWrite',
     ],
 
-    // 主机权限（全部12个平台）
+    // 主机权限（全部平台）
     host_permissions: [
       // favicon（用于账号管理页的平台图标显示）
       'https://www.google.com/s2/favicons*',
@@ -147,6 +147,24 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
       // 百家号
       'https://*.baidu.com/*',
       'https://baijiahao.baidu.com/*',
+      
+      // Medium
+      'https://medium.com/*',
+      'https://*.medium.com/*',
+      
+      // 头条号
+      'https://mp.toutiao.com/*',
+      'https://*.toutiao.com/*',
+      'https://sso.toutiao.com/*',
+      
+      // InfoQ
+      'https://www.infoq.cn/*',
+      'https://*.infoq.cn/*',
+      'https://xie.infoq.cn/*',
+      
+      // 网易号
+      'https://mp.163.com/*',
+      'https://*.163.com/*',
     ],
 
     // Web 可访问资源
@@ -233,7 +251,7 @@ const manifest = {
     'clipboardWrite',
   ],
 
-  // 主机权限（全部12个平台）
+  // 主机权限（全部平台）
   host_permissions: [
     // 微信公众号
     'https://mp.weixin.qq.com/*',
@@ -300,6 +318,24 @@ const manifest = {
     // 百家号
     'https://*.baidu.com/*',
     'https://baijiahao.baidu.com/*',
+    
+    // Medium
+    'https://medium.com/*',
+    'https://*.medium.com/*',
+    
+    // 头条号
+    'https://mp.toutiao.com/*',
+    'https://*.toutiao.com/*',
+    'https://sso.toutiao.com/*',
+    
+    // InfoQ
+    'https://www.infoq.cn/*',
+    'https://*.infoq.cn/*',
+    'https://xie.infoq.cn/*',
+    
+    // 网易号
+    'https://mp.163.com/*',
+    'https://*.163.com/*',
   ],
 
   // Web 可访问资源
