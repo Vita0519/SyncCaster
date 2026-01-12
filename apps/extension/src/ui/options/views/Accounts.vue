@@ -59,7 +59,7 @@
             <n-avatar
               :size="32"
               :src="account.avatar || getPlatformIconUrl(account.platform)"
-              :fallback-src="getDefaultIconUrl()"
+              :fallback-src="getPlatformIconUrl(account.platform)"
             />
             <span 
               class="account-name"

@@ -117,7 +117,7 @@
               <div v-if="enabledAccounts.length > 0" class="account-list">
                 <div v-for="account in enabledAccounts" :key="account.id" class="account-item" :class="{ selected: selectedAccounts.includes(account.id), disabled: isAccountDisabled(account) }" @click="!isAccountDisabled(account) && toggleAccount(account.id)">
                   <input type="checkbox" :checked="selectedAccounts.includes(account.id)" :disabled="isAccountDisabled(account)" />
-                  <img v-if="account.avatar" :src="account.avatar" :alt="account.nickname" class="avatar" />
+                  <img :src="account.avatar || getPlatformIconUrl(account.platform)" :alt="account.nickname" class="avatar" @error="(e: Event) => handleAvatarError(e, account.platform)" />
                   <div class="account-info">
                     <div class="nickname">{{ account.nickname }}</div>
                     <div class="platform">
@@ -539,8 +539,19 @@ async function loadEnabledAccounts() {
   catch { enabledAccounts.value = []; }
 }
 
+function getPlatformIconUrl(platform: string): string {
+  return chrome.runtime.getURL(`assets/platforms/${platform}.png`);
+}
+
+function handleAvatarError(e: Event, platform: string) {
+  const img = e.target as HTMLImageElement;
+  if (img) {
+    img.src = getPlatformIconUrl(platform);
+  }
+}
+
 function getPlatformName(platform: string): string {
-  const names: Record<string, string> = { wechat: '微信公众号', zhihu: '知乎', juejin: '掘金', csdn: 'CSDN', jianshu: '简书', cnblogs: '博客园', '51cto': '51CTO', 'tencent-cloud': '腾讯云', aliyun: '阿里云', segmentfault: '思否', bilibili: 'B站专栏', oschina: '开源中国' };
+  const names: Record<string, string> = { wechat: '微信公众号', zhihu: '知乎', juejin: '掘金', csdn: 'CSDN', jianshu: '简书', cnblogs: '博客园', '51cto': '51CTO', 'tencent-cloud': '腾讯云开发者社区', aliyun: '阿里云开发者社区', segmentfault: '思否', bilibili: 'B站专栏', oschina: '开源中国', toutiao: '今日头条', baijiahao: '百家号', wangyihao: '网易号', infoq: 'InfoQ', medium: 'Medium' };
   return names[platform] || platform;
 }
 

@@ -122,11 +122,16 @@ function getPlatformName(platform: string): string {
     jianshu: '简书',
     cnblogs: '博客园',
     '51cto': '51CTO',
-    'tencent-cloud': '腾讯云',
-    aliyun: '阿里云',
+    'tencent-cloud': '腾讯云开发者社区',
+    aliyun: '阿里云开发者社区',
     segmentfault: '思否',
     bilibili: 'B站专栏',
     oschina: '开源中国',
+    toutiao: '今日头条',
+    baijiahao: '百家号',
+    wangyihao: '网易号',
+    infoq: 'InfoQ',
+    medium: 'Medium',
   };
   return names[platform] || platform;
 }
@@ -146,6 +151,11 @@ function getPlatformIcon(platform: string): string {
     segmentfault: '🟢',
     bilibili: '📺',
     oschina: '🔴',
+    toutiao: '📰',
+    baijiahao: '🔵',
+    wangyihao: '🔴',
+    infoq: '📊',
+    medium: '📝',
   };
   return icons[platform] || '📄';
 }
