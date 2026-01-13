@@ -49,14 +49,6 @@ SyncCaster 是一个浏览器扩展，帮助内容创作者将文章一键同步
 
 ## 快速开始
 
-### 方式一：在线安装（推荐）
-
-1. 访问 [Chrome 应用商店](https://chrome.google.com/webstore/detail/synccaster/[extension-id])
-2. 点击 **添加至 Chrome**
-3. 确认安装即可使用
-
-### 方式二：本地开发
-
 ```bash
 # 安装依赖
 pnpm install

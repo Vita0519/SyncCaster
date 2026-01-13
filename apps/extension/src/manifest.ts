@@ -14,8 +14,8 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
     icons: {
       16: 'assets/icon-16.png',
       32: 'assets/icon-32.png',
-      48: 'assets/icon-32.png',
-      128: 'assets/icon-192.png',
+      48: 'assets/icon-48.png',
+      128: 'assets/icon-128.png',
     },
 
     // 弹出窗口
@@ -196,8 +196,8 @@ const manifest = {
   icons: {
     16: 'assets/icon-16.png',
     32: 'assets/icon-32.png',
-    48: 'assets/icon-32.png',
-    128: 'assets/icon-192.png',
+    48: 'assets/icon-48.png',
+    128: 'assets/icon-128.png',
   },
   
   // 弹出窗口
