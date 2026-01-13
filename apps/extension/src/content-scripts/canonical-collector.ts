@@ -877,17 +877,143 @@ function resolveImageUrl(assetId: string, originalUrl: string | undefined, asset
 }
 
 
+// ========== 平台规则定义 ==========
+
+/**
+ * 平台采集规则（内联定义，避免循环依赖）
+ * 这些规则定义了每个平台的内容选择器和需要移除的元素
+ */
+interface PlatformRule {
+  id: string;
+  urlPatterns: RegExp[];
+  contentSelectors: string[];
+  titleSelector?: string;
+  removeSelectors?: string[];
+}
+
+const platformRules: PlatformRule[] = [
+  {
+    id: 'segmentfault',
+    urlPatterns: [/segmentfault\.com\/a\//],
+    contentSelectors: [
+      // 思否文章正文使用 article-fmt 类包裹 markdown 渲染内容
+      // 需要精确匹配主文章区域，避免匹配到评论或相关文章
+      'article.article .article-content .article-fmt',
+      'article.article .article__content .fmt',
+      'article .article-content .fmt',
+      '.article-area .article-content',
+      '.article-content .fmt',
+      '.article__content .fmt',
+      '.article-fmt',
+      '.fmt.article-fmt',
+    ],
+    titleSelector: 'article.article h1.article__title, .article-area h1, h1.article__title, h1.title',
+    removeSelectors: [
+      '.article-actions',
+      '.comment-list',
+      '.comment-area',
+      '.related-articles',
+      '.recommend-box',
+      '.article-footer',
+      '.article-tags',
+      '.article-author',
+      '.share-box',
+      '.follow-btn',
+      '[class*="comment"]',
+      '[class*="Comment"]',
+      '[class*="recommend"]',
+      '[class*="related"]',
+    ],
+  },
+  {
+    id: 'juejin',
+    urlPatterns: [/juejin\.cn\/post\//],
+    contentSelectors: ['.markdown-body', '.article-content', '[class*="article-content"]'],
+    titleSelector: '.article-title, h1.title',
+    removeSelectors: ['.copy-code-btn', '.code-block-extension-header', '.article-suspended-panel'],
+  },
+  {
+    id: 'csdn',
+    urlPatterns: [/blog\.csdn\.net\/.*\/article/],
+    contentSelectors: ['#content_views', '.markdown_views', '.article_content'],
+    titleSelector: '.title-article, h1.title',
+    removeSelectors: ['.hide-article-box', '.blog-tags-box', '.recommend-box'],
+  },
+  {
+    id: 'zhihu',
+    urlPatterns: [/zhihu\.com\/(question|p)\//],
+    contentSelectors: ['.RichText', '.Post-RichText', '.ArticleItem-content'],
+    titleSelector: '.QuestionHeader-title, .Post-Title',
+    removeSelectors: ['.ContentItem-actions', '.RichContent-actions'],
+  },
+  {
+    id: 'jianshu',
+    urlPatterns: [/jianshu\.com\/p\//],
+    contentSelectors: ['.article', '._2rhmJa', '[class*="article"]'],
+    titleSelector: '.title, h1',
+    removeSelectors: ['.follow-detail', '.support-author'],
+  },
+  {
+    id: 'cnblogs',
+    urlPatterns: [/cnblogs\.com\/.*\/p\//],
+    contentSelectors: ['#cnblogs_post_body', '.blogpost-body', '.post-body'],
+    titleSelector: '.postTitle, #cb_post_title_url',
+    removeSelectors: ['.postDesc', '#blog_post_info'],
+  },
+];
+
+/**
+ * 根据 URL 匹配平台规则
+ */
+function matchPlatformRule(url: string): PlatformRule | null {
+  for (const rule of platformRules) {
+    for (const pattern of rule.urlPatterns) {
+      if (pattern.test(url)) {
+        return rule;
+      }
+    }
+  }
+  return null;
+}
+
 // ========== 主采集函数 ==========
 
 /**
  * 尝试使用平台特定选择器获取内容
  */
 function tryGetContentBySelector(): Element | null {
-  // 常见平台的内容选择器（按优先级排序）
+  const url = window.location.href;
+  const platformRule = matchPlatformRule(url);
+  
+  // 如果匹配到平台规则，优先使用平台特定选择器
+  if (platformRule) {
+    console.log('[canonical-collector] 匹配到平台规则:', platformRule.id);
+    
+    // 先移除干扰元素
+    if (platformRule.removeSelectors) {
+      for (const selector of platformRule.removeSelectors) {
+        const elements = document.querySelectorAll(selector);
+        elements.forEach(el => {
+          console.log('[canonical-collector] 移除干扰元素:', selector, el.className);
+          el.remove();
+        });
+      }
+    }
+    
+    // 使用平台特定选择器
+    for (const selector of platformRule.contentSelectors) {
+      const el = document.querySelector(selector);
+      if (el && el.textContent && el.textContent.trim().length > 50) {
+        console.log('[canonical-collector] 使用平台选择器找到内容:', selector);
+        return el;
+      }
+    }
+  }
+  
+  // 通用选择器（按优先级排序）
   const selectors = [
     // 掘金
     '.markdown-body',
-    '.article-content',
     // 知乎
     '.Post-RichText',
     '.RichText',
@@ -914,7 +1040,7 @@ function tryGetContentBySelector(): Element | null {
   for (const selector of selectors) {
     const el = document.querySelector(selector);
     if (el && el.textContent && el.textContent.trim().length > 100) {
-      console.log('[canonical-collector] 使用选择器找到内容:', selector);
+      console.log('[canonical-collector] 使用通用选择器找到内容:', selector);
       return el;
     }
   }

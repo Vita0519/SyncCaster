@@ -67,6 +67,7 @@ export function getManifest(mode: 'development' | 'production'): chrome.runtime.
       'storage',
       'scripting',
       'tabs',
+      'tabGroups',  // ✨ 新增：标签页组管理，用于将发布页面归入同一组
       'alarms',
       'notifications',
       'sidePanel',
@@ -241,6 +242,7 @@ const manifest = {
     'storage',
     'scripting',
     'tabs',
+    'tabGroups',  // ✨ 新增：标签页组管理，用于将发布页面归入同一组
     'alarms',
     'notifications',
     'sidePanel',

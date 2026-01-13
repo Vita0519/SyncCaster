@@ -207,7 +207,7 @@ export async function publishToTarget(
         }
 
         if (domTargetUrl) {
-          await openOrReuseTab(domTargetUrl, { active: activeTab, reuseKey: domReuseKey });
+          await openOrReuseTab(domTargetUrl, { active: activeTab, reuseKey: domReuseKey, addToSyncGroup: true });
           await jobLogger({ level: 'info', step: 'dom', message: '已打开发布页面', meta: { url: domTargetUrl } });
         }
       } catch (e: any) {
@@ -383,7 +383,7 @@ export async function publishToTarget(
           await jobLogger({ level: 'info', step: 'dom', message: 'InfoQ: 正在创建草稿...' });
           try {
             // 先打开 InfoQ 首页（用于获取 cookie）
-            await openOrReuseTab(targetUrl, { active: activeTab, reuseKey });
+            await openOrReuseTab(targetUrl, { active: activeTab, reuseKey, addToSyncGroup: true });
             // 等待页面加载
             await new Promise(resolve => setTimeout(resolve, 1500));
             // 在页面上下文中执行 createDraft

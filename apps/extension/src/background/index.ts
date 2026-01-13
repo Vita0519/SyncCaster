@@ -10,6 +10,7 @@ import { startZhihuLearn, fetchZhihuLearnedTemplate } from './learn-recorder';
 import { AccountService } from './account-service';
 import { fetchPlatformUserInfo } from './platform-api';
 import { publishWechatFromMdEditor } from './wechat-md-publish';
+import { resetSyncGroup } from './tab-group-manager';
 
 const logger = new Logger('background');
 
@@ -668,6 +669,11 @@ async function executeJob(jobId: string) {
     targets: job.targets.length,
     platforms: job.targets.map(t => t.platform).join(', ')
   });
+  
+  // 重置同步组，开始新的发布批次
+  // 所有发布页面将被归入同一个标签页组中
+  resetSyncGroup();
+  logger.info('job', 'Reset sync group for new publish batch');
   
   try {
     let successCount = 0;

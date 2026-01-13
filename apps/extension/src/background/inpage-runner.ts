@@ -1,5 +1,7 @@
 /* In-page runner utilities: open target origin in a background tab and execute code in page MAIN world */
 
+import { addTabToSyncGroup } from './tab-group-manager';
+
 export async function waitForLoad(tabId: number, timeoutMs = 30000): Promise<void> {
   const started = Date.now();
   return new Promise<void>((resolve, reject) => {
@@ -47,10 +49,11 @@ export async function getReuseTabInfo(reuseKey: string): Promise<{ tabId: number
  */
 export async function openOrReuseTab(
   url: string,
-  opts: { active?: boolean; reuseKey?: string } = {}
+  opts: { active?: boolean; reuseKey?: string; addToSyncGroup?: boolean } = {}
 ): Promise<{ tabId: number; url: string; reused: boolean }> {
   const reuseKey = opts.reuseKey;
-  console.log('[inpage-runner] openOrReuseTab', { url, active: opts.active, reuseKey });
+  const shouldAddToSyncGroup = opts.addToSyncGroup ?? false;
+  console.log('[inpage-runner] openOrReuseTab', { url, active: opts.active, reuseKey, addToSyncGroup: shouldAddToSyncGroup });
 
   let tab: chrome.tabs.Tab | undefined;
   try {
@@ -71,6 +74,12 @@ export async function openOrReuseTab(
       if (reuseKey) {
         reuseTabs.set(reuseKey, { tabId: tab.id, createdAt: Date.now(), lastUrl: url });
       }
+      
+      // 将新创建的标签添加到同步组
+      if (shouldAddToSyncGroup && tab.id && tab.windowId) {
+        await addTabToSyncGroup(tab.id, tab.windowId);
+      }
+      
       return { tabId: tab.id, url, reused: false };
     }
 
@@ -87,6 +96,11 @@ export async function openOrReuseTab(
 
     if (opts.active) {
       await chrome.tabs.update(tab.id, { active: true });
+    }
+    
+    // 复用的标签也确保在同步组中
+    if (shouldAddToSyncGroup && tab.id && tab.windowId) {
+      await addTabToSyncGroup(tab.id, tab.windowId);
     }
 
     return { tabId: tab.id, url, reused: true };

@@ -12,7 +12,7 @@ logs
 *.log
 npm-debug.log*
 
-# Editor
+# Editor & IDE
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
@@ -20,6 +20,12 @@ npm-debug.log*
 *.swp
 *.swo
 *~
+
+# AI Tools
+.kiro
+.claude
+.cursor
+.copilot
 
 # OS
 .DS_Store
@@ -34,4 +40,5 @@ Thumbs.db
 *.tmp
 .cache
 
+# Extension build artifacts
 apps/extension/public/md-editor/static/js/

@@ -139,13 +139,36 @@ export const platformRules: PlatformRule[] = [
     name: '思否',
     urlPatterns: [/segmentfault\.com\/a\//],
     contentSelectors: [
-      '.article-content',
-      '.article__content',
-      '[class*="article-content"]',
+      // 思否文章正文使用 article-fmt 类包裹 markdown 渲染内容
+      // 需要精确匹配主文章区域，避免匹配到评论或相关文章
+      'article.article .article-content .article-fmt',
+      'article.article .article__content .fmt',
+      'article .article-content .fmt',
+      '.article-area .article-content',
+      // 降级选择器
+      '.article-content .fmt',
+      '.article__content .fmt',
+      '.article-fmt',
+      '.fmt.article-fmt',
     ],
-    titleSelector: '.article__title, h1.title',
+    titleSelector: 'article.article h1.article__title, .article-area h1, h1.article__title, h1.title',
     removeSelectors: [
       '.article-actions',
+      '.comment-list',
+      '.comment-area',
+      '.related-articles',
+      '.recommend-box',
+      '.article-footer',
+      '.article-tags',
+      '.article-author',
+      '.share-box',
+      '.follow-btn',
+      // 移除评论相关元素
+      '[class*="comment"]',
+      '[class*="Comment"]',
+      // 移除相关推荐
+      '[class*="recommend"]',
+      '[class*="related"]',
     ],
     special: {
       mathEngine: 'katex',

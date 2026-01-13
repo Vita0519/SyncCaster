@@ -1,16 +1,19 @@
 import type { PlatformAdapter } from './base';
+import { renderMarkdownToHtmlForPaste } from '@synccaster/core';
 
 /**
  * 开源中国适配器
  * 
  * 平台特点：
  * - 入口：https://my.oschina.net/u/{userId}/blog/write（需要登录）
- * - 编辑器：Markdown 编辑器
- * - 支持：Markdown 语法
+ * - 编辑器：HTML 富文本编辑器（也支持 Markdown 模式）
+ * - 支持：HTML 格式
  * - 结构：标题 + 正文
  * 
  * 发布策略：
  * - 使用 DOM 自动化填充内容
+ * - 优先使用 HTML 编辑器模式
+ * - 图片链接和公式需要转换为 HTML 格式
  * - 不执行最终发布操作，由用户手动完成
  */
 export const oschinaAdapter: PlatformAdapter = {
@@ -39,9 +42,16 @@ export const oschinaAdapter: PlatformAdapter = {
   },
 
   async transform(post) {
+    const markdown = post.body_md || '';
+    
+    // 将 Markdown 转换为 HTML，确保图片链接被正确渲染为 <img> 标签
+    // 这对于公式图片（来自 codecogs）和普通图片都很重要
+    const contentHtml = renderMarkdownToHtmlForPaste(markdown);
+    
     return {
       title: post.title,
-      contentMarkdown: post.body_md,
+      contentMarkdown: markdown,
+      contentHtml: contentHtml,
       tags: post.tags,
       categories: post.categories,
       summary: post.summary,

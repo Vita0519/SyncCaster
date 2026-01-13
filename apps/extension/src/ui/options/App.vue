@@ -168,9 +168,8 @@
           </div>
           <h3 class="text-lg font-bold mb-2">SyncCaster</h3>
           <p class="text-sm text-gray-500 mb-4">一款高效的内容采集与多平台发布助手</p>
-          <p class="text-xs text-gray-400 mb-4">基于 Doocs MD 编辑器，支持微信公众号排版</p>
           <div class="flex justify-center gap-3">
-            <n-button size="small" @click="window.open('https://github.com/RyanYipeng/SyncCaster', '_blank')">GitHub 仓库</n-button>
+            <n-button size="small" @click="openGitHubRepo">GitHub 仓库</n-button>
           </div>
         </div>
       </n-modal>
@@ -378,6 +377,11 @@ function handleHelp(key: string) {
       showSponsorDialog.value = true;
       break;
   }
+}
+
+// 打开GitHub仓库
+function openGitHubRepo() {
+  window.open('https://github.com/RyanYipeng/SyncCaster', '_blank');
 }
 
 // 导入功能
