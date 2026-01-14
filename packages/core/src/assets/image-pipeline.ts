@@ -963,12 +963,15 @@ export class ImageUploadPipeline {
     let result = normalizeMarkdownImageLinkDestinations(content);
 
     for (const [originalUrl, newUrl] of urlMapping) {
-      // 替换 Markdown 图片语法
+      // 替换 Markdown 图片语法（兼容可选 title：`![](url "title")`）
       const mdPattern = new RegExp(
-        `!\\[([^\\]]*)\\]\\(\\s*<?${escapeRegExp(originalUrl)}>?\\s*\\)`,
+        `!\\[([^\\]]*)\\]\\(\\s*<?${escapeRegExp(originalUrl)}>?\\s*(?:\\s+((?:\"[^\"]*\")|(?:'[^']*')))?\\s*\\)`,
         'g'
       );
-      result = result.replace(mdPattern, `![$1](${newUrl})`);
+      result = result.replace(mdPattern, (_m, alt: string, titlePart?: string) => {
+        const t = titlePart ? ` ${titlePart}` : '';
+        return `![${alt}](${newUrl}${t})`;
+      });
 
       // 替换 HTML img 标签
       const htmlPattern = new RegExp(

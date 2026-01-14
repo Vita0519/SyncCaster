@@ -469,9 +469,9 @@ describe('Image Paste Utils - Error Isolation', () => {
    */
   it('Property 9: handleImagePaste returns error result without throwing', () => {
     fc.assert(
-      fc.property(
+      fc.asyncProperty(
         fc.boolean(),
-        () => {
+        async () => {
           // Create a mock ClipboardEvent with no image
           const mockEvent = {
             clipboardData: createMockDataTransfer({ hasImage: false, hasText: true }),
@@ -479,13 +479,10 @@ describe('Image Paste Utils - Error Isolation', () => {
           } as unknown as ClipboardEvent;
           
           // Should not throw, should return error result
-          const resultPromise = handleImagePaste(mockEvent);
-          expect(resultPromise).toBeInstanceOf(Promise);
-          
-          return resultPromise.then(result => {
-            expect(result.success).toBe(false);
-            expect(result.error).toBeDefined();
-          });
+          const result = await handleImagePaste(mockEvent);
+          expect(result.success).toBe(false);
+          expect(result.error).toBeDefined();
+          return true;
         }
       ),
       { numRuns: 100 }
@@ -494,12 +491,9 @@ describe('Image Paste Utils - Error Isolation', () => {
 
   it('unsupported format returns error without throwing', () => {
     fc.assert(
-      fc.property(
-        unsupportedMimeTypeArb,
+      fc.asyncProperty(
+        unsupportedMimeTypeArb.filter((m) => m.startsWith('image/')),
         async (mimeType) => {
-          // Only test with actual image/* types that are unsupported
-          if (!mimeType.startsWith('image/')) return;
-          
           const mockEvent = {
             clipboardData: createMockDataTransfer({ hasImage: true, mimeType }),
             preventDefault: () => {},
@@ -510,6 +504,7 @@ describe('Image Paste Utils - Error Isolation', () => {
           // Should return error, not throw
           expect(result.success).toBe(false);
           expect(result.error).toBe(IMAGE_PASTE_ERRORS.unsupportedFormat);
+          return true;
         }
       ),
       { numRuns: 100 }

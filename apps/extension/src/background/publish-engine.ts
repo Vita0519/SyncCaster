@@ -3,7 +3,7 @@ import { ChromeStorageBridge } from '@synccaster/core';
 import { getAdapter } from '@synccaster/adapters';
 import { executeInOrigin, getReuseTabInfo, openOrReuseTab } from './inpage-runner';
 import { ImageUploadPipeline, getImageStrategy, type ImageUploadProgress, renderMarkdownToHtmlForPaste } from '@synccaster/core';
-import type { AssetManifest } from '@synccaster/core';
+import { buildAssetManifestFromPost, type AssetManifest } from '@synccaster/core';
 
 export interface EngineResult {
   success: boolean;
@@ -82,7 +82,7 @@ export async function publishToTarget(
 ): Promise<EngineResult> {
   console.log('[publish-engine] publishToTarget called', { jobId, platform: target.platform });
   const activeTab = options.activeTab ?? true;
-  
+
   let adapter: any;
   try {
     adapter = getAdapter(target.platform);
@@ -217,7 +217,7 @@ export async function publishToTarget(
       }
     }
 
-    const manifest = buildAssetManifest(processedPost);
+    const manifest = buildAssetManifestFromPost(processedPost);
     const hasLocalPasteImages = manifest.images.some((img) => img.originalUrl.startsWith('local://'));
     let strategy = getImageStrategy(target.platform);
 
@@ -262,7 +262,7 @@ export async function publishToTarget(
         throw e;
       }
     }
-    
+
     // 处理图片：若目标平台不接受外链，需先上传并替换 URL。
     // domPasteUpload（如掘金/阿里云）在“同一发布页”里做粘贴上传更稳定，避免先打开一个空白上传页导致报错/阻塞。
     let downloadedImages: DownloadedImage[] = [];
@@ -280,6 +280,12 @@ export async function publishToTarget(
         ? manifest.images.filter((img) => img.originalUrl.startsWith('local://'))
         : manifest.images;
 
+    console.log('[publish-engine] Image processing check:', {
+      prefillBeforeImageProcessing,
+      imagesToProcessCount: imagesToProcess.length,
+      strategy: strategy?.mode || 'null',
+      needsDownloadedImagesForDomFill
+    });
     if (!prefillBeforeImageProcessing && imagesToProcess.length > 0 && strategy && strategy.mode !== 'externalUrlOnly') {
       await jobLogger({
         level: 'info',
@@ -342,6 +348,11 @@ export async function publishToTarget(
             { reuseKey: domReuseKey, targetUrl: domTargetUrl, closeTab: false, active: false }
           );
 
+          console.log('[publish-engine] Upload result:', {
+            urlMappingSize: imageResult.urlMapping.size,
+            stats: imageResult.stats,
+            mappings: Array.from(imageResult.urlMapping.entries()).slice(0, 3)
+          });
           if (imageResult.urlMapping.size > 0) {
             processedPost = {
               ...processedPost,
@@ -405,7 +416,7 @@ export async function publishToTarget(
       if ((adapter as any).dom) {
         const dom = (adapter as any).dom as { matchers: string[]; fillAndPublish: Function; getEditorUrl?: (accountId?: string) => string | Promise<string>; createDraft?: Function };
         const reuseKey = `${jobId}:${target.platform}:${target.accountId}`;
-        
+
         // 获取目标 URL - 优先使用 getEditorUrl 动态生成（支持需要用户ID的平台）
         let targetUrl: string;
         if (domTargetUrl) {
@@ -417,7 +428,7 @@ export async function publishToTarget(
         } else {
           targetUrl = toDomOpenUrl(dom.matchers?.[0] || '');
         }
-        
+
         if (!targetUrl) {
           throw new Error('DOM adapter missing target URL');
         }
@@ -434,7 +445,7 @@ export async function publishToTarget(
             // 在页面上下文中执行 createDraft
             const draftResult = await executeInOrigin<{ success: boolean; draftUrl?: string; error?: string }>(targetUrl, dom.createDraft as any, [], { closeTab: false, active: activeTab, reuseKey });
             console.log('[publish-engine] InfoQ createDraft result:', draftResult);
-            
+
             if (draftResult?.success && draftResult?.draftUrl) {
               targetUrl = draftResult.draftUrl;
               await jobLogger({ level: 'info', step: 'dom', message: `InfoQ: 草稿创建成功，跳转到编辑页`, meta: { draftUrl: targetUrl } });
@@ -459,339 +470,339 @@ export async function publishToTarget(
             __downloadedImages: downloadedImages,
             __imageStrategy: strategy,
           };
-           // 发布页需要保留给用户观察/手动操作：不要自动关闭标签页
-           result = await executeInOrigin(targetUrl, dom.fillAndPublish as any, [payloadWithImages], { closeTab: false, active: activeTab, reuseKey });
-           if (result === null || result === undefined) {
-             throw new Error('DOM 自动化脚本未返回结果（可能页面脚本报错），请查看目标页面 Console 日志');
-           }
-           console.log('[publish-engine] DOM automation result', result);
-         } catch (e: any) {
-            console.error('[publish-engine] DOM automation error', e);
-            await jobLogger({ level: 'error', step: 'dom', message: 'DOM 自动化失败', meta: { error: e?.message, stack: e?.stack } });
-            throw e;
-         }
+          // 发布页需要保留给用户观察/手动操作：不要自动关闭标签页
+          result = await executeInOrigin(targetUrl, dom.fillAndPublish as any, [payloadWithImages], { closeTab: false, active: activeTab, reuseKey });
+          if (result === null || result === undefined) {
+            throw new Error('DOM 自动化脚本未返回结果（可能页面脚本报错），请查看目标页面 Console 日志');
+          }
+          console.log('[publish-engine] DOM automation result', result);
+        } catch (e: any) {
+          console.error('[publish-engine] DOM automation error', e);
+          await jobLogger({ level: 'error', step: 'dom', message: 'DOM 自动化失败', meta: { error: e?.message, stack: e?.stack } });
+          throw e;
+        }
 
-         // 对于需要图片转链的平台：优先让“正文/标题”快速填入，然后再异步处理图片并回写（改善首屏体验）。
-         // 目前仅对 B 站专栏启用（CSDN 已跳过图片预处理）。
-         if (
-           prefillBeforeImageProcessing &&
-           target.platform === 'bilibili' &&
-           manifest.images.length > 0 &&
-           strategy &&
-           strategy.mode !== 'externalUrlOnly'
-         ) {
-           await jobLogger({ level: 'info', step: 'upload_images', message: `发现 ${manifest.images.length} 张图片需要处理` });
-           try {
-             const imageResult = await uploadImagesInPlatform(
-               manifest.images,
-               target.platform,
-               strategy,
-               (progress) => {
-                 jobLogger({
-                   level: 'info',
-                   step: 'upload_images',
-                   message: `图片上传: ${progress.completed}/${progress.total}`,
-                   meta: { progress },
-                 });
-               },
-               // 传递 reuseKey 和 targetUrl，确保图片上传回退到站内执行时复用已打开的编辑页标签页
-               { reuseKey, targetUrl, closeTab: false, active: false }
-             );
+        // 对于需要图片转链的平台：优先让“正文/标题”快速填入，然后再异步处理图片并回写（改善首屏体验）。
+        // 目前仅对 B 站专栏启用（CSDN 已跳过图片预处理）。
+        if (
+          prefillBeforeImageProcessing &&
+          target.platform === 'bilibili' &&
+          manifest.images.length > 0 &&
+          strategy &&
+          strategy.mode !== 'externalUrlOnly'
+        ) {
+          await jobLogger({ level: 'info', step: 'upload_images', message: `发现 ${manifest.images.length} 张图片需要处理` });
+          try {
+            const imageResult = await uploadImagesInPlatform(
+              manifest.images,
+              target.platform,
+              strategy,
+              (progress) => {
+                jobLogger({
+                  level: 'info',
+                  step: 'upload_images',
+                  message: `图片上传: ${progress.completed}/${progress.total}`,
+                  meta: { progress },
+                });
+              },
+              // 传递 reuseKey 和 targetUrl，确保图片上传回退到站内执行时复用已打开的编辑页标签页
+              { reuseKey, targetUrl, closeTab: false, active: false }
+            );
 
-             if (imageResult.urlMapping.size > 0) {
-               const entries = Array.from(imageResult.urlMapping.entries());
-               const applyMappingInEditor = async (pairs: [string, string][]) => {
-                 const replaceByPairs = (text: string) => {
-                   let out = text || '';
-                   const sorted = pairs.slice().sort((a, b) => b[0].length - a[0].length);
-                   for (const [from, to] of sorted) {
-                     if (!from || !to || from === to) continue;
-                     out = out.split(from).join(to);
-                   }
-                   return out;
-                 };
+            if (imageResult.urlMapping.size > 0) {
+              const entries = Array.from(imageResult.urlMapping.entries());
+              const applyMappingInEditor = async (pairs: [string, string][]) => {
+                const replaceByPairs = (text: string) => {
+                  let out = text || '';
+                  const sorted = pairs.slice().sort((a, b) => b[0].length - a[0].length);
+                  for (const [from, to] of sorted) {
+                    if (!from || !to || from === to) continue;
+                    out = out.split(from).join(to);
+                  }
+                  return out;
+                };
 
-                 const getAllDocs = (): Document[] => {
-                   const docs: Document[] = [document];
-                   const iframes = Array.from(document.querySelectorAll('iframe')) as HTMLIFrameElement[];
-                   for (const iframe of iframes) {
-                     try {
-                       const doc = iframe.contentDocument;
-                       if (doc) docs.push(doc);
-                     } catch {}
-                   }
-                   return docs;
-                 };
+                const getAllDocs = (): Document[] => {
+                  const docs: Document[] = [document];
+                  const iframes = Array.from(document.querySelectorAll('iframe')) as HTMLIFrameElement[];
+                  for (const iframe of iframes) {
+                    try {
+                      const doc = iframe.contentDocument;
+                      if (doc) docs.push(doc);
+                    } catch { }
+                  }
+                  return docs;
+                };
 
-                 const findEditor = (): HTMLElement | null => {
-                   for (const doc of getAllDocs()) {
-                     const el = doc.querySelector('.ql-editor, .ProseMirror, [contenteditable=\"true\"]') as HTMLElement | null;
-                     if (el) return el;
-                   }
-                   return null;
-                 };
+                const findEditor = (): HTMLElement | null => {
+                  for (const doc of getAllDocs()) {
+                    const el = doc.querySelector('.ql-editor, .ProseMirror, [contenteditable=\"true\"]') as HTMLElement | null;
+                    if (el) return el;
+                  }
+                  return null;
+                };
 
-                 const editor = findEditor();
-                 if (!editor) return { ok: false, reason: 'editor_not_found' };
-                 const win = editor.ownerDocument.defaultView || window;
-                 const QuillCtor = (win as any).Quill;
-                 const quill =
-                   QuillCtor?.find?.(editor) ||
-                   (editor as any).__quill ||
-                   ((editor.closest('.ql-container') as any)?.__quill ?? null);
+                const editor = findEditor();
+                if (!editor) return { ok: false, reason: 'editor_not_found' };
+                const win = editor.ownerDocument.defaultView || window;
+                const QuillCtor = (win as any).Quill;
+                const quill =
+                  QuillCtor?.find?.(editor) ||
+                  (editor as any).__quill ||
+                  ((editor.closest('.ql-container') as any)?.__quill ?? null);
 
-                 const currentHtml = editor.innerHTML || '';
-                 const nextHtml = replaceByPairs(currentHtml);
+                const currentHtml = editor.innerHTML || '';
+                const nextHtml = replaceByPairs(currentHtml);
 
-                 // 优先用 Quill API 回写，保证编辑器内部 state 更新
-                 try {
-                   if (quill?.clipboard?.dangerouslyPasteHTML) {
-                     quill.clipboard.dangerouslyPasteHTML(0, nextHtml);
-                     quill.setSelection?.(quill.getLength?.() ?? 0, 0);
-                     return { ok: true, method: 'quill' };
-                   }
-                 } catch {}
+                // 优先用 Quill API 回写，保证编辑器内部 state 更新
+                try {
+                  if (quill?.clipboard?.dangerouslyPasteHTML) {
+                    quill.clipboard.dangerouslyPasteHTML(0, nextHtml);
+                    quill.setSelection?.(quill.getLength?.() ?? 0, 0);
+                    return { ok: true, method: 'quill' };
+                  }
+                } catch { }
 
-                 // DOM 兜底：替换 img/src 等属性
-                 try {
-                   editor.innerHTML = nextHtml;
-                   editor.dispatchEvent(new Event('input', { bubbles: true }));
-                   return { ok: true, method: 'dom' };
-                 } catch {
-                   return { ok: false, reason: 'apply_failed' };
-                 }
-               };
+                // DOM 兜底：替换 img/src 等属性
+                try {
+                  editor.innerHTML = nextHtml;
+                  editor.dispatchEvent(new Event('input', { bubbles: true }));
+                  return { ok: true, method: 'dom' };
+                } catch {
+                  return { ok: false, reason: 'apply_failed' };
+                }
+              };
 
-               await executeInOrigin(targetUrl, applyMappingInEditor as any, [entries], {
-                 closeTab: false,
-                 active: false,
-                 reuseKey,
-               });
+              await executeInOrigin(targetUrl, applyMappingInEditor as any, [entries], {
+                closeTab: false,
+                active: false,
+                reuseKey,
+              });
 
-               await jobLogger({
-                 level: 'info',
-                 step: 'upload_images',
-                 message: `图片处理完成: ${imageResult.stats.success}/${imageResult.stats.total} 成功`,
-                 meta: imageResult.stats,
-               });
-             } else {
-               await jobLogger({ level: 'warn', step: 'upload_images', message: '图片上传失败，将使用原始链接' });
-             }
-           } catch (imgError: any) {
-             console.error('[publish-engine] 图片处理失败', imgError);
-             await jobLogger({
-               level: 'warn',
-               step: 'upload_images',
-               message: '图片处理失败，将使用原始链接',
-               meta: { error: imgError?.message },
-             });
-           }
-         }
+              await jobLogger({
+                level: 'info',
+                step: 'upload_images',
+                message: `图片处理完成: ${imageResult.stats.success}/${imageResult.stats.total} 成功`,
+                meta: imageResult.stats,
+              });
+            } else {
+              await jobLogger({ level: 'warn', step: 'upload_images', message: '图片上传失败，将使用原始链接' });
+            }
+          } catch (imgError: any) {
+            console.error('[publish-engine] 图片处理失败', imgError);
+            await jobLogger({
+              level: 'warn',
+              step: 'upload_images',
+              message: '图片处理失败，将使用原始链接',
+              meta: { error: imgError?.message },
+            });
+          }
+        }
 
-         // OSChina：外链图片在预览/发布中经常不可用，优先让标题/正文快速填入，再在同一编辑页中上传并回写链接。
-         if (
-           prefillBeforeImageProcessing &&
-           target.platform === 'oschina' &&
-           manifest.images.length > 0 &&
-           strategy &&
-           strategy.mode !== 'externalUrlOnly'
-         ) {
-           await jobLogger({ level: 'info', step: 'upload_images', message: `发现 ${manifest.images.length} 张图片需要处理` });
-           try {
-             const tabInfo = await getReuseTabInfo(reuseKey);
-             const inTabUrl = tabInfo?.url || targetUrl;
+        // OSChina：外链图片在预览/发布中经常不可用，优先让标题/正文快速填入，再在同一编辑页中上传并回写链接。
+        if (
+          prefillBeforeImageProcessing &&
+          target.platform === 'oschina' &&
+          manifest.images.length > 0 &&
+          strategy &&
+          strategy.mode !== 'externalUrlOnly'
+        ) {
+          await jobLogger({ level: 'info', step: 'upload_images', message: `发现 ${manifest.images.length} 张图片需要处理` });
+          try {
+            const tabInfo = await getReuseTabInfo(reuseKey);
+            const inTabUrl = tabInfo?.url || targetUrl;
 
-             const imageResult = await uploadImagesInPlatform(
-               manifest.images,
-               target.platform,
-               strategy,
-               (progress) => {
-                 jobLogger({
-                   level: 'info',
-                   step: 'upload_images',
-                   message: `图片上传: ${progress.completed}/${progress.total}`,
-                   meta: { progress },
-                 });
-               },
-               { targetUrl: inTabUrl, reuseKey, closeTab: false, active: false }
-             );
+            const imageResult = await uploadImagesInPlatform(
+              manifest.images,
+              target.platform,
+              strategy,
+              (progress) => {
+                jobLogger({
+                  level: 'info',
+                  step: 'upload_images',
+                  message: `图片上传: ${progress.completed}/${progress.total}`,
+                  meta: { progress },
+                });
+              },
+              { targetUrl: inTabUrl, reuseKey, closeTab: false, active: false }
+            );
 
-             if (imageResult.urlMapping.size > 0) {
-               const entries = Array.from(imageResult.urlMapping.entries());
+            if (imageResult.urlMapping.size > 0) {
+              const entries = Array.from(imageResult.urlMapping.entries());
 
-               const applyMappingInMarkdownEditor = async (pairs: [string, string][]) => {
-                 const replaceByPairs = (text: string) => {
-                   let out = text || '';
-                   const sorted = pairs.slice().sort((a, b) => b[0].length - a[0].length);
-                   for (const [from, to] of sorted) {
-                     if (!from || !to || from === to) continue;
-                     out = out.split(from).join(to);
-                   }
-                   return out;
-                 };
+              const applyMappingInMarkdownEditor = async (pairs: [string, string][]) => {
+                const replaceByPairs = (text: string) => {
+                  let out = text || '';
+                  const sorted = pairs.slice().sort((a, b) => b[0].length - a[0].length);
+                  for (const [from, to] of sorted) {
+                    if (!from || !to || from === to) continue;
+                    out = out.split(from).join(to);
+                  }
+                  return out;
+                };
 
-                 const getRectArea = (el: Element) => {
-                   const r = (el as HTMLElement).getBoundingClientRect();
-                   return Math.max(1, r.width) * Math.max(1, r.height);
-                 };
+                const getRectArea = (el: Element) => {
+                  const r = (el as HTMLElement).getBoundingClientRect();
+                  return Math.max(1, r.width) * Math.max(1, r.height);
+                };
 
-                 const getAllDocs = (): Document[] => {
-                   const docs: Document[] = [document];
-                   const iframes = Array.from(document.querySelectorAll('iframe')) as HTMLIFrameElement[];
-                   for (const iframe of iframes) {
-                     try {
-                       const doc = iframe.contentDocument;
-                       if (doc) docs.push(doc);
-                     } catch {}
-                   }
-                   return docs;
-                 };
+                const getAllDocs = (): Document[] => {
+                  const docs: Document[] = [document];
+                  const iframes = Array.from(document.querySelectorAll('iframe')) as HTMLIFrameElement[];
+                  for (const iframe of iframes) {
+                    try {
+                      const doc = iframe.contentDocument;
+                      if (doc) docs.push(doc);
+                    } catch { }
+                  }
+                  return docs;
+                };
 
-                 const findRichEditor = (): HTMLElement | null => {
-                   const candidates: HTMLElement[] = [];
-                   for (const doc of getAllDocs()) {
-                     candidates.push(...Array.from(doc.querySelectorAll<HTMLElement>('.ql-editor, .ProseMirror, [contenteditable=\"true\"]')));
-                   }
-                   const filtered = candidates.filter((el) => {
-                     const attrs = [
-                       el.getAttribute('placeholder') || '',
-                       el.getAttribute('aria-label') || '',
-                       el.getAttribute('name') || '',
-                       el.id || '',
-                       el.className || '',
-                     ]
-                       .join(' ')
-                       .toLowerCase();
-                     if (/title|标题/i.test(attrs)) return false;
-                     return true;
-                   });
-                   if (filtered.length === 0) return null;
-                   filtered.sort((a, b) => getRectArea(b) - getRectArea(a));
-                   return filtered[0];
-                 };
+                const findRichEditor = (): HTMLElement | null => {
+                  const candidates: HTMLElement[] = [];
+                  for (const doc of getAllDocs()) {
+                    candidates.push(...Array.from(doc.querySelectorAll<HTMLElement>('.ql-editor, .ProseMirror, [contenteditable=\"true\"]')));
+                  }
+                  const filtered = candidates.filter((el) => {
+                    const attrs = [
+                      el.getAttribute('placeholder') || '',
+                      el.getAttribute('aria-label') || '',
+                      el.getAttribute('name') || '',
+                      el.id || '',
+                      el.className || '',
+                    ]
+                      .join(' ')
+                      .toLowerCase();
+                    if (/title|标题/i.test(attrs)) return false;
+                    return true;
+                  });
+                  if (filtered.length === 0) return null;
+                  filtered.sort((a, b) => getRectArea(b) - getRectArea(a));
+                  return filtered[0];
+                };
 
-                 const rich = findRichEditor();
-                 if (rich) {
-                   const current = String(rich.innerHTML || '');
-                   const next = replaceByPairs(current);
-                   if (next !== current) {
-                     const win = rich.ownerDocument.defaultView || window;
-                     const QuillCtor = (win as any).Quill;
-                     const quill =
-                       QuillCtor?.find?.(rich) ||
-                       (rich as any).__quill ||
-                       ((rich.closest('.ql-container') as any)?.__quill ?? null);
-                     try {
-                       if (quill?.clipboard?.dangerouslyPasteHTML) {
-                         quill.clipboard.dangerouslyPasteHTML(0, next);
-                         quill.setSelection?.(quill.getLength?.() ?? 0, 0);
-                         return { ok: true, method: 'quill' };
-                       }
-                     } catch {}
+                const rich = findRichEditor();
+                if (rich) {
+                  const current = String(rich.innerHTML || '');
+                  const next = replaceByPairs(current);
+                  if (next !== current) {
+                    const win = rich.ownerDocument.defaultView || window;
+                    const QuillCtor = (win as any).Quill;
+                    const quill =
+                      QuillCtor?.find?.(rich) ||
+                      (rich as any).__quill ||
+                      ((rich.closest('.ql-container') as any)?.__quill ?? null);
+                    try {
+                      if (quill?.clipboard?.dangerouslyPasteHTML) {
+                        quill.clipboard.dangerouslyPasteHTML(0, next);
+                        quill.setSelection?.(quill.getLength?.() ?? 0, 0);
+                        return { ok: true, method: 'quill' };
+                      }
+                    } catch { }
 
-                     try {
-                       rich.innerHTML = next;
-                       rich.dispatchEvent(new Event('input', { bubbles: true }));
-                       rich.dispatchEvent(new Event('change', { bubbles: true }));
-                       return { ok: true, method: 'rich' };
-                     } catch {}
-                   }
-                   return { ok: true, method: 'rich_noop' };
-                 }
+                    try {
+                      rich.innerHTML = next;
+                      rich.dispatchEvent(new Event('input', { bubbles: true }));
+                      rich.dispatchEvent(new Event('change', { bubbles: true }));
+                      return { ok: true, method: 'rich' };
+                    } catch { }
+                  }
+                  return { ok: true, method: 'rich_noop' };
+                }
 
-                 const findCodeMirror = () => {
-                   for (const doc of getAllDocs()) {
-                     const els = Array.from(doc.querySelectorAll('.CodeMirror')) as any[];
-                     for (const el of els) {
-                       const cm = el?.CodeMirror;
-                       if (cm?.getValue && cm?.setValue) return { cm, el: el as HTMLElement };
-                     }
-                   }
-                   return null;
-                 };
+                const findCodeMirror = () => {
+                  for (const doc of getAllDocs()) {
+                    const els = Array.from(doc.querySelectorAll('.CodeMirror')) as any[];
+                    for (const el of els) {
+                      const cm = el?.CodeMirror;
+                      if (cm?.getValue && cm?.setValue) return { cm, el: el as HTMLElement };
+                    }
+                  }
+                  return null;
+                };
 
-                 const findTextarea = () => {
-                   for (const doc of getAllDocs()) {
-                     const tas = Array.from(doc.querySelectorAll('textarea')) as HTMLTextAreaElement[];
-                     const candidates = tas.filter((ta) => {
-                       const attrs = [
-                         ta.getAttribute('placeholder') || '',
-                         ta.getAttribute('aria-label') || '',
-                         ta.getAttribute('name') || '',
-                         ta.id || '',
-                         ta.className || '',
-                       ]
-                         .join(' ')
-                         .toLowerCase();
-                       return !/title|标题/i.test(attrs);
-                     });
-                     if (candidates.length > 0) return candidates[0];
-                   }
-                   return null;
-                 };
+                const findTextarea = () => {
+                  for (const doc of getAllDocs()) {
+                    const tas = Array.from(doc.querySelectorAll('textarea')) as HTMLTextAreaElement[];
+                    const candidates = tas.filter((ta) => {
+                      const attrs = [
+                        ta.getAttribute('placeholder') || '',
+                        ta.getAttribute('aria-label') || '',
+                        ta.getAttribute('name') || '',
+                        ta.id || '',
+                        ta.className || '',
+                      ]
+                        .join(' ')
+                        .toLowerCase();
+                      return !/title|标题/i.test(attrs);
+                    });
+                    if (candidates.length > 0) return candidates[0];
+                  }
+                  return null;
+                };
 
-                 const cmFound = findCodeMirror();
-                 if (cmFound) {
-                   const cm = cmFound.cm;
-                   const current = String(cm.getValue?.() ?? '');
-                   const next = replaceByPairs(current);
-                   if (next !== current) {
-                     const doc = cm.getDoc?.() || null;
-                     const cursor = doc?.getCursor?.() || null;
-                     cm.setValue(next);
-                     try { cm.refresh?.(); } catch {}
-                     try {
-                       if (cursor && doc?.setCursor) doc.setCursor(cursor);
-                     } catch {}
-                   }
-                   try {
-                     const ta = (cmFound.el as any).querySelector?.('textarea') as HTMLTextAreaElement | null;
-                     ta?.dispatchEvent(new Event('input', { bubbles: true }));
-                   } catch {}
-                   return { ok: true, method: 'codemirror' };
-                 }
+                const cmFound = findCodeMirror();
+                if (cmFound) {
+                  const cm = cmFound.cm;
+                  const current = String(cm.getValue?.() ?? '');
+                  const next = replaceByPairs(current);
+                  if (next !== current) {
+                    const doc = cm.getDoc?.() || null;
+                    const cursor = doc?.getCursor?.() || null;
+                    cm.setValue(next);
+                    try { cm.refresh?.(); } catch { }
+                    try {
+                      if (cursor && doc?.setCursor) doc.setCursor(cursor);
+                    } catch { }
+                  }
+                  try {
+                    const ta = (cmFound.el as any).querySelector?.('textarea') as HTMLTextAreaElement | null;
+                    ta?.dispatchEvent(new Event('input', { bubbles: true }));
+                  } catch { }
+                  return { ok: true, method: 'codemirror' };
+                }
 
-                 const ta = findTextarea();
-                 if (ta) {
-                   const current = String(ta.value || '');
-                   const next = replaceByPairs(current);
-                   if (next !== current) {
-                     ta.value = next;
-                     ta.dispatchEvent(new Event('input', { bubbles: true }));
-                     ta.dispatchEvent(new Event('change', { bubbles: true }));
-                   }
-                   return { ok: true, method: 'textarea' };
-                 }
+                const ta = findTextarea();
+                if (ta) {
+                  const current = String(ta.value || '');
+                  const next = replaceByPairs(current);
+                  if (next !== current) {
+                    ta.value = next;
+                    ta.dispatchEvent(new Event('input', { bubbles: true }));
+                    ta.dispatchEvent(new Event('change', { bubbles: true }));
+                  }
+                  return { ok: true, method: 'textarea' };
+                }
 
-                 return { ok: false, reason: 'editor_not_found' };
-               };
+                return { ok: false, reason: 'editor_not_found' };
+              };
 
-               await executeInOrigin(inTabUrl, applyMappingInMarkdownEditor as any, [entries], {
-                 closeTab: false,
-                 active: false,
-                 reuseKey,
-               });
+              await executeInOrigin(inTabUrl, applyMappingInMarkdownEditor as any, [entries], {
+                closeTab: false,
+                active: false,
+                reuseKey,
+              });
 
-               await jobLogger({
-                 level: 'info',
-                 step: 'upload_images',
-                 message: `图片处理完成: ${imageResult.stats.success}/${imageResult.stats.total} 成功`,
-                 meta: imageResult.stats,
-               });
-             } else {
-               await jobLogger({ level: 'warn', step: 'upload_images', message: '图片上传失败，将使用原始链接' });
-             }
-           } catch (imgError: any) {
-             console.error('[publish-engine] 图片处理失败', imgError);
-             await jobLogger({
-               level: 'warn',
-               step: 'upload_images',
-               message: '图片处理失败，将使用原始链接',
-               meta: { error: imgError?.message },
-             });
-           }
-         }
-       } else {
+              await jobLogger({
+                level: 'info',
+                step: 'upload_images',
+                message: `图片处理完成: ${imageResult.stats.success}/${imageResult.stats.total} 成功`,
+                meta: imageResult.stats,
+              });
+            } else {
+              await jobLogger({ level: 'warn', step: 'upload_images', message: '图片上传失败，将使用原始链接' });
+            }
+          } catch (imgError: any) {
+            console.error('[publish-engine] 图片处理失败', imgError);
+            await jobLogger({
+              level: 'warn',
+              step: 'upload_images',
+              message: '图片处理失败，将使用原始链接',
+              meta: { error: imgError?.message },
+            });
+          }
+        }
+      } else {
         throw new Error('DOM adapter missing dom configuration');
       }
     } else if (adapter.kind === 'metaweblog' || adapter.kind === 'restApi') {
@@ -928,6 +939,68 @@ function resolveImageInput(input: ImageInput): { originalUrl: string; dataUrl?: 
   return { originalUrl: input.originalUrl, dataUrl: input.metadata?.dataUrl };
 }
 
+async function resolveLocalImageDataForUpload(
+  url: string,
+  dataUrl?: string
+): Promise<{ base64: string; mimeType: string } | null> {
+  let ref = dataUrl;
+
+  // Fallback: try to resolve from db.assets (when post.assets omitted blobUrl to reduce payload size)
+  if (!ref) {
+    const id = url.startsWith('local://') ? url.slice('local://'.length) : '';
+    if (id) {
+      try {
+        const asset = await db.assets.get(id as any);
+        const anyAsset = asset as any;
+        ref =
+          (typeof anyAsset?.blobUrl === 'string' && anyAsset.blobUrl) ||
+          (typeof anyAsset?.dataUrl === 'string' && anyAsset.dataUrl) ||
+          (typeof anyAsset?.url === 'string' && anyAsset.url) ||
+          undefined;
+      } catch {
+        // ignore lookup failures
+      }
+    }
+  }
+
+  if (!ref || typeof ref !== 'string') return null;
+
+  // Preferred: Data URL is portable across origins and can be passed into page context safely.
+  if (ref.startsWith('data:')) {
+    return { base64: ref, mimeType: guessMimeTypeFromDataUrl(ref) || 'image/png' };
+  }
+
+  // Blob URL: try to fetch it in background and convert to a Data URL for portability.
+  if (ref.startsWith('blob:')) {
+    try {
+      const res = await fetch(ref);
+      if (!res.ok) throw new Error(`blob fetch failed: HTTP ${res.status}`);
+      const blob = await res.blob();
+      const base64 = await blobToBase64(blob);
+      return { base64, mimeType: guessMimeTypeFromDataUrl(base64) || blob.type || 'image/png' };
+    } catch (e) {
+      console.warn('[publish-engine] local:// blobUrl fetch failed', { url, blobUrl: ref, error: (e as any)?.message });
+      return null;
+    }
+  }
+
+  // Some legacy data might store an http(s) URL in blobUrl; download and convert.
+  if (ref.startsWith('http://') || ref.startsWith('https://')) {
+    try {
+      const resp = await fetchImageWithBestEffort(ref);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const blob = await resp.blob();
+      const base64 = await blobToBase64(blob);
+      return { base64, mimeType: blob.type || guessMimeTypeFromDataUrl(base64) || 'image/png' };
+    } catch (e) {
+      console.warn('[publish-engine] local:// fallback http(s) fetch failed', { url, ref, error: (e as any)?.message });
+      return null;
+    }
+  }
+
+  return null;
+}
+
 /**
  * 在 background 中下载图片（绕过 CORS/防盗链）
  */
@@ -944,15 +1017,16 @@ async function downloadImagesInBackground(
 
       // local:// 粘贴图片：使用文章 assets 中存储的 Data URL（无需网络下载）
       if (url.startsWith('local://')) {
-        if (!dataUrl || !dataUrl.startsWith('data:')) {
-          console.warn('[publish-engine] local:// 图片缺少 dataUrl，跳过下载', { url });
+        const resolved = await resolveLocalImageDataForUpload(url, dataUrl);
+        if (!resolved) {
+          console.warn('[publish-engine] local:// 图片缺少可用数据（dataUrl/blobUrl），跳过下载', { url });
           continue;
         }
 
         downloadedImages.push({
           url,
-          base64: dataUrl,
-          mimeType: guessMimeTypeFromDataUrl(dataUrl) || 'image/png',
+          base64: resolved.base64,
+          mimeType: resolved.mimeType,
         });
 
         onProgress?.({ completed: i + 1, total: images.length });
@@ -1076,15 +1150,16 @@ async function uploadImagesInPlatform(
 
       // local:// 粘贴图片：使用文章 assets 中存储的 Data URL（无需网络下载）
       if (url.startsWith('local://')) {
-        if (!dataUrl || !dataUrl.startsWith('data:')) {
-          console.warn('[publish-engine] local:// 图片缺少 dataUrl，跳过上传', { url });
+        const resolved = await resolveLocalImageDataForUpload(url, dataUrl);
+        if (!resolved) {
+          console.warn('[publish-engine] local:// 图片缺少可用数据（dataUrl/blobUrl），跳过上传', { url });
           continue;
         }
 
         downloadedImages.push({
           url,
-          base64: dataUrl,
-          mimeType: guessMimeTypeFromDataUrl(dataUrl) || 'image/png',
+          base64: resolved.base64,
+          mimeType: resolved.mimeType,
         });
 
         onProgress?.({ completed: i + 1, total: images.length * 2 });
@@ -1222,7 +1297,7 @@ async function uploadImagesInPlatform(
 
           let uploadedUrl: string | undefined;
           let lastError: string | undefined;
-          
+
           for (const ep of endpoints) {
             try {
               const form = new FormData();
@@ -1234,23 +1309,23 @@ async function uploadImagesInPlatform(
 
               console.log(`[publish-engine] 尝试 B 站 API: ${ep.url}`);
               const resp = await fetch(ep.url, { method: 'POST', body: form, credentials: 'include' });
-              
+
               if (!resp.ok) {
                 lastError = `HTTP ${resp.status}`;
                 console.warn(`[publish-engine] B 站 API 返回错误: ${lastError}`);
                 continue;
               }
-              
+
               const data = await tryParseJson(resp);
               console.log('[publish-engine] B 站 API 响应:', JSON.stringify(data).substring(0, 200));
-              
+
               // B 站 API 返回格式：{ code: 0, data: { url: "..." } }
               if (data?.code !== 0) {
                 lastError = data?.message || `code: ${data?.code}`;
                 console.warn(`[publish-engine] B 站 API 业务错误: ${lastError}`);
                 continue;
               }
-              
+
               uploadedUrl = findUrlInObject(data);
               if (uploadedUrl) {
                 console.log(`[publish-engine] B 站图片上传成功: ${uploadedUrl}`);
@@ -1273,15 +1348,15 @@ async function uploadImagesInPlatform(
           console.error(`[publish-engine] B 站图片处理失败:`, e?.message || e);
           failed++;
         } finally {
-          onProgress?.({ completed: success + failed, total: imageUrls.length });
+          onProgress?.({ completed: success + failed, total: downloadedImages.length });
         }
       }
 
       if (success > 0) {
         console.log(`[publish-engine] bilibili API 直传完成: ${success}/${downloadedImages.length} 成功`);
-        return { urlMapping, stats: { total: imageUrls.length, success, failed } };
+        return { urlMapping, stats: { total: downloadedImages.length, success, failed } };
       }
-      
+
       console.warn(`[publish-engine] B 站 API 直传全部失败 (${failed}/${downloadedImages.length})，将回退到站内执行`);
     } catch (e: any) {
       console.warn('[publish-engine] B 站 API 直传异常，回退到站内执行:', e?.message || e);
@@ -1341,7 +1416,7 @@ async function uploadImagesInPlatform(
           if (typeof strategy.responseParser === 'function') {
             try {
               newUrl = strategy.responseParser(data)?.url;
-            } catch {}
+            } catch { }
           }
           if (!newUrl) {
             if ((data as any)?.data) {
@@ -1360,20 +1435,20 @@ async function uploadImagesInPlatform(
               const origin = new URL(String(strategy.uploadUrl)).origin;
               newUrl = origin + newUrl;
             }
-          } catch {}
+          } catch { }
 
           urlMapping.set(img.url, newUrl);
           success++;
         } catch {
           failed++;
         } finally {
-          onProgress?.({ completed: success + failed, total: imageUrls.length });
+          onProgress?.({ completed: success + failed, total: downloadedImages.length });
         }
       }
 
       if (success > 0) {
         console.log(`[publish-engine] background 直传完成: ${success}/${downloadedImages.length} 成功`);
-        return { urlMapping, stats: { total: imageUrls.length, success, failed } };
+        return { urlMapping, stats: { total: downloadedImages.length, success, failed } };
       }
 
       console.warn('[publish-engine] background 直传全部失败，回退到站内执行');
@@ -1387,7 +1462,7 @@ async function uploadImagesInPlatform(
     strategyConfig: any
   ) => {
     console.log('[image-upload] 开始在页面中上传图片', { count: images.length, mode: strategyConfig.mode });
-    
+
     const results: { originalUrl: string; newUrl: string; success: boolean; error?: string }[] = [];
 
     const mimeToExt = (mime: string) => {
@@ -1537,7 +1612,7 @@ async function uploadImagesInPlatform(
           if (!w || !d) continue;
           const el = findInDocBestEffort(d, w, selector);
           if (el) return { el, win: w };
-        } catch (e) {}
+        } catch (e) { }
       }
 
       return null;
@@ -1561,21 +1636,21 @@ async function uploadImagesInPlatform(
         if (typeof hostWin !== 'undefined' && typeof hostWin.focus === 'function') {
           hostWin.focus();
         }
-      } catch (_) {}
+      } catch (_) { }
       if (typeof el.focus === 'function') {
         el.focus();
       }
       try {
         el.dispatchEvent(new Event('focus', { bubbles: true }));
-      } catch (_) {}
+      } catch (_) { }
       if (typeof (el as any).click === 'function') {
         try {
           (el as any).click();
-        } catch (_) {}
+        } catch (_) { }
       }
       await new Promise((r) => setTimeout(r, 80));
     };
-    
+
     if (strategyConfig.mode === 'domPasteUpload' && (window as any).__juejinDomPaste) {
       const cfg = strategyConfig.domPasteConfig || {};
       try {
@@ -1969,7 +2044,7 @@ async function processImagesForPlatform(
 }> {
   // 获取平台的图片上传策略
   const strategy = getImageStrategy(platformId);
-  
+
   if (!strategy) {
     console.log(`[publish-engine] 平台 ${platformId} 无图片上传策略，跳过图片处理`);
     return {
@@ -1988,8 +2063,8 @@ async function processImagesForPlatform(
   }
 
   // 构建资产清单
-  const manifest = buildAssetManifest(post);
-  
+  const manifest = buildAssetManifestFromPost(post);
+
   if (manifest.images.length === 0) {
     return {
       urlMapping: new Map(),
@@ -2017,147 +2092,6 @@ async function processImagesForPlatform(
   };
 
   return { urlMapping, stats };
-}
-
-/**
- * 从文章内容构建资产清单
- */
-function buildAssetManifest(post: CanonicalPost): AssetManifest {
-  const images: AssetManifest['images'] = [];
-  const seen = new Set<string>();
-
-  // 构建 asset 查找表，用于解析 local:// URL
-  const assetMap = new Map<string, (typeof post.assets extends (infer T)[] | undefined ? T : never)>();
-  if (post.assets) {
-    for (const asset of post.assets) {
-      if (asset.type === 'image') {
-        // 使用 url 作为 key（对于 local:// URL）
-        if (asset.url) {
-          assetMap.set(asset.url, asset);
-        }
-        // 也使用 id 作为 key
-        if (asset.id) {
-          assetMap.set(`local://${asset.id}`, asset);
-        }
-      }
-    }
-  }
-
-  // 从 Markdown 内容提取图片
-  if (post.body_md) {
-    const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-    let match;
-    while ((match = mdImageRegex.exec(post.body_md)) !== null) {
-      // 兼容 Markdown 标准语法：`![](<url> "title")` / `![](url "title")`
-      let inner = String(match[2] || '').trim();
-
-      // 分离可选 title（通常以引号开始），避免把 title 里的空格也当作 URL 的一部分
-      const quoteIdx = inner.search(/["']/);
-      if (quoteIdx > 0) {
-        inner = inner.slice(0, quoteIdx).trimEnd();
-      }
-
-      // 支持 ![](<url>) 写法：去掉包裹的尖括号
-      if (inner.startsWith('<') && inner.endsWith('>')) {
-        inner = inner.slice(1, -1);
-      }
-
-      // 去除 URL 中可能混入的空格/换行（如 `. jpeg`）
-      const url = inner.replace(/\s+/g, '');
-      if (url && !seen.has(url) && isExternalImage(url)) {
-        seen.add(url);
-        
-        // 对于 local:// URL，从 assets 中查找对应的 Data URL
-        let dataUrl: string | undefined;
-        if (url.startsWith('local://')) {
-          const asset = assetMap.get(url);
-          dataUrl = asset?.blobUrl;
-        }
-        
-        images.push({
-          id: `img-${images.length}`,
-          originalUrl: url,
-          metadata: {
-            format: guessImageFormat(url),
-            size: 0,
-            alt: match[1] || undefined,
-            dataUrl, // 存储实际的 Data URL
-          },
-          status: 'pending',
-        });
-      }
-    }
-  }
-
-  // 如果文章已有 assets，合并（跳过已经从 markdown 中提取的）
-  if (post.assets) {
-    for (const asset of post.assets) {
-      // AssetRef 使用 url 字段
-      if (asset.type === 'image' && asset.url && !seen.has(asset.url)) {
-        seen.add(asset.url);
-        images.push({
-          id: asset.id || `img-${images.length}`,
-          originalUrl: asset.url,
-          metadata: {
-            format: guessImageFormat(asset.url),
-            size: asset.size || 0,
-            alt: asset.alt,
-            // 对于 local:// URL，存储实际的 Data URL 以便后续解析
-            dataUrl: asset.url.startsWith('local://') ? asset.blobUrl : undefined,
-          },
-          status: 'pending',
-        });
-      }
-    }
-  }
-
-  return {
-    images,
-    formulas: [],
-  };
-}
-
-/**
- * 判断是否为外部图片（需要处理的图片）
- */
-function isExternalImage(url: string): boolean {
-  if (!url) return false;
-  
-  // 跳过 data URL（太长，不需要再处理）
-  if (url.startsWith('data:')) return false;
-  
-  // local:// URL 需要处理（粘贴的本地图片）
-  if (url.startsWith('local://')) return true;
-  
-  // 跳过相对路径
-  if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
-  
-  // 可以添加更多规则，比如跳过某些已知的公共 CDN
-  return true;
-}
-
-/**
- * 猜测图片格式
- */
-function guessImageFormat(url: string): 'jpeg' | 'png' | 'webp' | 'gif' | 'svg' | 'avif' {
-  const ext = url.split('.').pop()?.toLowerCase().split('?')[0];
-  switch (ext) {
-    case 'jpg':
-    case 'jpeg':
-      return 'jpeg';
-    case 'png':
-      return 'png';
-    case 'webp':
-      return 'webp';
-    case 'gif':
-      return 'gif';
-    case 'svg':
-      return 'svg';
-    case 'avif':
-      return 'avif';
-    default:
-      return 'jpeg';
-  }
 }
 
 function convertLatexMathToImageMarkdown(markdown: string): string {

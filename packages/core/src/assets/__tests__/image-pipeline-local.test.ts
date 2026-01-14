@@ -296,3 +296,27 @@ describe('Image Pipeline - No Local URLs After Replacement', () => {
     );
   });
 });
+
+describe('Image Pipeline - local:// URL Replacement', () => {
+  it('replaceImageUrls replaces local:// URLs in Markdown images', () => {
+    const markdown = '![a](local://img-1)';
+    const urlMapping = new Map<string, string>([['local://img-1', 'https://cdn.example.com/x.png']]);
+    const result = ImageUploadPipeline.replaceImageUrls(markdown, urlMapping);
+    expect(result).toBe('![a](https://cdn.example.com/x.png)');
+  });
+
+  it('replaceImageUrls preserves Markdown image titles', () => {
+    const markdown = '![a](local://img-1 \"t\")';
+    const urlMapping = new Map<string, string>([['local://img-1', 'https://cdn.example.com/x.png']]);
+    const result = ImageUploadPipeline.replaceImageUrls(markdown, urlMapping);
+    expect(result).toBe('![a](https://cdn.example.com/x.png \"t\")');
+  });
+
+  it('replaceImageUrls replaces local:// URLs in HTML <img> tags', () => {
+    const html = '<p><img src=\"local://img-1\" alt=\"a\"></p>';
+    const urlMapping = new Map<string, string>([['local://img-1', 'https://cdn.example.com/x.png']]);
+    const result = ImageUploadPipeline.replaceImageUrls(html, urlMapping);
+    expect(result).toContain('src=\"https://cdn.example.com/x.png\"');
+    expect(result).not.toContain('src=\"local://img-1\"');
+  });
+});

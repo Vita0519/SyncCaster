@@ -5,3 +5,4 @@ export * from './downloader';
 export * from './proxy';
 export * from './image-pipeline';
 export * from './platform-strategies';
+export * from './manifest';
