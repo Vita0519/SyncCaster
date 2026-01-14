@@ -45,8 +45,37 @@
             <span class="pane-label">Markdown 编辑</span>
             <button @click="copyText(body, '正文')" class="copy-link">复制源码</button>
           </div>
+          <!-- Markdown 快捷按钮工具栏 -->
+          <div class="md-toolbar" :class="isDark ? 'dark' : ''">
+            <button @click="insertMarkdownSyntax('ol')" class="md-tool-btn" title="有序列表">
+              <span>1.</span>
+            </button>
+            <button @click="insertMarkdownSyntax('ul')" class="md-tool-btn" title="无序列表">
+              <span>•</span>
+            </button>
+            <button @click="insertMarkdownSyntax('link')" class="md-tool-btn" title="链接">
+              <span>🔗</span>
+            </button>
+            <button @click="insertMarkdownSyntax('code')" class="md-tool-btn" title="代码块">
+              <span>{ }</span>
+            </button>
+            <button @click="insertMarkdownSyntax('quote')" class="md-tool-btn" title="引用">
+              <span>"</span>
+            </button>
+            <button @click="triggerImageUpload" class="md-tool-btn" title="图片">
+              <span>🖼️</span>
+            </button>
+          </div>
+          <!-- 隐藏的图片上传 input -->
+          <input 
+            ref="imageInputRef" 
+            type="file" 
+            accept="image/*" 
+            style="display: none" 
+            @change="handleImageUpload"
+          />
           <div class="pane-body">
-            <textarea ref="editorRef" v-model="body" class="editor-textarea" :class="isDark ? 'dark' : ''" placeholder="# 开始编辑你的 Markdown 内容..." @scroll="handleEditorScroll"></textarea>
+            <textarea ref="editorRef" v-model="body" class="editor-textarea" :class="isDark ? 'dark' : ''" placeholder="# 开始编辑你的 Markdown 内容..." @scroll="handleEditorScroll" @paste="onEditorPaste"></textarea>
           </div>
         </div>
 
@@ -75,7 +104,7 @@
         <div class="images-header">图片资源（{{ images.length }}）</div>
         <div class="images-list">
           <div v-for="img in images" :key="img.id" class="image-item" @click="previewImage(img)">
-            <img :src="img.url" :alt="img.alt || ''" />
+            <img :src="img.blobUrl || img.url" :alt="img.alt || ''" />
           </div>
         </div>
       </div>
@@ -85,7 +114,7 @@
     <Teleport to="body">
       <div v-if="previewImg" class="modal-overlay" @click="closeImagePreview">
         <div class="image-preview-modal">
-          <img :src="previewImg.url" :alt="previewImg.alt || ''" />
+          <img :src="previewImg.blobUrl || previewImg.url" :alt="previewImg.alt || ''" />
           <div v-if="previewImg.title || previewImg.alt" class="image-caption">{{ previewImg.title || previewImg.alt }}</div>
         </div>
       </div>
@@ -168,6 +197,15 @@ import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { useMessage } from 'naive-ui';
 import { db, type Account, ChromeStorageBridge, type SyncCasterArticle, AccountStatus } from '@synccaster/core';
 import { renderMarkdownPreview, processMermaidInContainer } from '../utils/markdown-preview';
+import { 
+  hasImageInClipboard, 
+  handleImagePaste, 
+  pastedImageToAssetRef,
+  revokeBlobUrls,
+  extractImageUrlsFromMarkdown,
+  generateLocalImageUrl,
+  IMAGE_PASTE_ERRORS 
+} from '../utils/image-paste-utils';
 import '../markdown-preview.css';
 
 defineProps<{ isDark?: boolean }>();
@@ -191,6 +229,7 @@ const selectedAccounts = ref<string[]>([]);
 
 const editorRef = ref<HTMLTextAreaElement | null>(null);
 const previewRef = ref<HTMLDivElement | null>(null);
+const imageInputRef = ref<HTMLInputElement | null>(null);
 
 // 未保存修改状态追踪
 const savedTitle = ref('');
@@ -200,6 +239,26 @@ const hasUnsavedChanges = computed(() => title.value !== savedTitle.value || bod
 // 保存确认弹窗
 const showUnsavedDialog = ref(false);
 const pendingNavigation = ref<string | null>(null);
+
+// 处理 beforenavigate 事件，拦截导航
+function handleBeforeNavigate(event: Event) {
+  const customEvent = event as CustomEvent<{ targetPath: string }>;
+  const targetPath = customEvent.detail?.targetPath;
+  
+  // 如果目标是编辑器页面，不拦截
+  if (targetPath?.startsWith('editor/') || targetPath?.startsWith('editor')) {
+    return;
+  }
+  
+  // 如果有未保存的修改，拦截导航
+  if (hasUnsavedChanges.value) {
+    event.preventDefault();
+    // 记录待跳转目标
+    pendingNavigation.value = targetPath || null;
+    // 显示保存确认弹窗
+    showUnsavedDialog.value = true;
+  }
+}
 
 // 可调整的尺寸
 const editorHeight = ref(420);
@@ -326,6 +385,314 @@ function handlePreviewScroll() {
   });
 }
 
+// ========== 图片粘贴处理 ==========
+
+/**
+ * 处理编辑器粘贴事件
+ * 图片会被转换为 Data URL 格式存储，但在编辑器中使用短链接引用
+ */
+async function onEditorPaste(event: ClipboardEvent) {
+  // 检查是否有图片
+  if (!hasImageInClipboard(event.clipboardData)) {
+    // 没有图片，执行默认的文本粘贴行为
+    return;
+  }
+  
+  // 阻止默认行为，我们自己处理图片
+  event.preventDefault();
+  
+  try {
+    const result = await handleImagePaste(event);
+    
+    if (!result.success || !result.image) {
+      // 显示错误提示
+      showValidationError(result.error || IMAGE_PASTE_ERRORS.blobCreation);
+      return;
+    }
+    
+    // 创建资源对象
+    const asset = pastedImageToAssetRef(result.image);
+    
+    // 添加到图片资源列表
+    addImageToAssets(asset);
+    
+    // 在光标位置插入 Markdown 图片语法（使用短链接引用）
+    const localUrl = generateLocalImageUrl(result.image.id);
+    insertImageMarkdown(localUrl, 'image');
+    
+    // 显示成功提示
+    showCopySuccess('图片已添加');
+  } catch (error) {
+    console.error('[Editor] Image paste error:', error);
+    showValidationError(IMAGE_PASTE_ERRORS.blobCreation);
+  }
+}
+
+/**
+ * 在光标位置插入 Markdown 图片语法
+ */
+function insertImageMarkdown(url: string, alt: string = 'image') {
+  const editor = editorRef.value;
+  if (!editor) return;
+  
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const text = body.value;
+  
+  // 构建 Markdown 图片语法
+  const imageMarkdown = `![${alt}](${url})`;
+  
+  // 在光标位置插入
+  body.value = text.slice(0, start) + imageMarkdown + text.slice(end);
+  
+  // 将光标移动到插入内容之后
+  nextTick(() => {
+    const newPosition = start + imageMarkdown.length;
+    editor.selectionStart = newPosition;
+    editor.selectionEnd = newPosition;
+    editor.focus();
+  });
+}
+
+/**
+ * 插入 Markdown 语法快捷操作
+ * @param type - 语法类型: 'ol' | 'ul' | 'link' | 'code' | 'quote' | 'image'
+ */
+function insertMarkdownSyntax(type: 'ol' | 'ul' | 'link' | 'code' | 'quote' | 'image') {
+  const editor = editorRef.value;
+  if (!editor) return;
+  
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const text = body.value;
+  const selectedText = text.slice(start, end);
+  
+  let insertText = '';
+  let cursorOffset = 0; // 光标相对于插入起始位置的偏移
+  
+  switch (type) {
+    case 'ol':
+      // 有序列表
+      if (selectedText) {
+        // 将选中的多行文本转换为有序列表
+        const lines = selectedText.split('\n');
+        insertText = lines.map((line, i) => `${i + 1}. ${line}`).join('\n');
+        cursorOffset = insertText.length;
+      } else {
+        insertText = '1. ';
+        cursorOffset = insertText.length;
+      }
+      break;
+      
+    case 'ul':
+      // 无序列表
+      if (selectedText) {
+        const lines = selectedText.split('\n');
+        insertText = lines.map(line => `- ${line}`).join('\n');
+        cursorOffset = insertText.length;
+      } else {
+        insertText = '- ';
+        cursorOffset = insertText.length;
+      }
+      break;
+      
+    case 'link':
+      // 链接
+      if (selectedText) {
+        insertText = `[${selectedText}](url)`;
+        cursorOffset = insertText.length - 4; // 定位到 url
+      } else {
+        insertText = '[链接文字](url)';
+        cursorOffset = 1; // 定位到链接文字开始位置
+      }
+      break;
+      
+    case 'code':
+      // 代码块
+      if (selectedText) {
+        insertText = '```\n' + selectedText + '\n```';
+        cursorOffset = 3; // 定位到语言标识位置
+      } else {
+        insertText = '```\n\n```';
+        cursorOffset = 4; // 定位到代码内容位置
+      }
+      break;
+      
+    case 'quote':
+      // 引用
+      if (selectedText) {
+        const lines = selectedText.split('\n');
+        insertText = lines.map(line => `> ${line}`).join('\n');
+        cursorOffset = insertText.length;
+      } else {
+        insertText = '> ';
+        cursorOffset = insertText.length;
+      }
+      break;
+      
+    case 'image':
+      // 图片
+      insertText = '![alt](url)';
+      cursorOffset = 2; // 定位到 alt 位置
+      break;
+  }
+  
+  // 在光标位置插入
+  body.value = text.slice(0, start) + insertText + text.slice(end);
+  
+  // 将光标移动到适当位置
+  nextTick(() => {
+    const newPosition = start + cursorOffset;
+    editor.selectionStart = newPosition;
+    editor.selectionEnd = newPosition;
+    editor.focus();
+  });
+}
+
+/**
+ * 添加图片到资源列表
+ */
+function addImageToAssets(asset: any) {
+  // 检查是否已存在相同 ID 的图片
+  const exists = images.value.some(img => img.id === asset.id);
+  if (!exists) {
+    images.value.push(asset);
+  }
+}
+
+/**
+ * 触发图片上传对话框
+ */
+function triggerImageUpload() {
+  imageInputRef.value?.click();
+}
+
+/**
+ * 处理图片上传
+ */
+async function handleImageUpload(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  
+  // 清空 input 以便再次选择同一文件
+  input.value = '';
+  
+  try {
+    // 压缩图片并获取 Data URL
+    const { dataUrl, width, height } = await compressImage(file);
+    
+    // 生成图片 ID
+    const imageId = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    
+    // 创建资源对象
+    const asset = {
+      id: imageId,
+      type: 'image',
+      url: `local://${imageId}`,
+      blobUrl: dataUrl,
+      alt: file.name.replace(/\.[^.]+$/, ''),
+      mimeType: 'image/jpeg', // 压缩后统一为 JPEG
+      size: dataUrl.length,
+      width,
+      height,
+    };
+    
+    // 添加到资源列表
+    addImageToAssets(asset);
+    
+    // 在光标位置插入 Markdown 图片语法
+    const localUrl = `local://${imageId}`;
+    insertImageMarkdown(localUrl, asset.alt || 'image');
+    
+    // 显示成功提示
+    showCopySuccess('图片已上传');
+  } catch (error) {
+    console.error('[Editor] Image upload error:', error);
+    showValidationError('图片上传失败');
+  }
+}
+
+/**
+ * 压缩图片
+ * - 超过 1MB 或尺寸过大的图片会被压缩
+ * - 最大尺寸: 1920x1080
+ * - JPEG 质量: 0.85
+ */
+async function compressImage(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
+  const MAX_SIZE = 1 * 1024 * 1024; // 1MB
+  const MAX_WIDTH = 1920;
+  const MAX_HEIGHT = 1080;
+  const QUALITY = 0.85;
+  
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    
+    reader.onload = (e) => {
+      const originalDataUrl = e.target?.result as string;
+      if (!originalDataUrl) {
+        reject(new Error('读取文件失败'));
+        return;
+      }
+      
+      img.onload = () => {
+        let { width, height } = img;
+        
+        // 检查是否需要压缩
+        const needsResize = width > MAX_WIDTH || height > MAX_HEIGHT;
+        const needsCompress = file.size > MAX_SIZE;
+        
+        if (!needsResize && !needsCompress) {
+          // 小图片直接返回原始 Data URL
+          resolve({ dataUrl: originalDataUrl, width, height });
+          return;
+        }
+        
+        // 计算缩放比例
+        if (needsResize) {
+          const scaleW = MAX_WIDTH / width;
+          const scaleH = MAX_HEIGHT / height;
+          const scale = Math.min(scaleW, scaleH, 1);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        
+        // 使用 Canvas 压缩
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('无法创建 Canvas 上下文'));
+          return;
+        }
+        
+        // 绘制缩放后的图片
+        ctx.drawImage(img, 0, 0, width, height);
+        
+        // 转换为 JPEG Data URL
+        const compressedDataUrl = canvas.toDataURL('image/jpeg', QUALITY);
+        
+        resolve({ dataUrl: compressedDataUrl, width, height });
+      };
+      
+      img.onerror = () => {
+        reject(new Error('加载图片失败'));
+      };
+      
+      img.src = originalDataUrl;
+    };
+    
+    reader.onerror = () => {
+      reject(new Error('读取文件失败'));
+    };
+    
+    reader.readAsDataURL(file);
+  });
+}
+
 function isAccountDisabled(account: Account): boolean {
   return account.status === AccountStatus.EXPIRED || account.status === AccountStatus.ERROR;
 }
@@ -338,7 +705,27 @@ const allSelected = computed(() => {
 
 const previewHtml = computed(() => {
   if (!body.value) return '<p class="empty-hint">暂无内容</p>';
-  try { return renderMarkdownPreview(body.value); }
+  try {
+    // 在渲染前，将 local:// URL 替换为实际的 Data URL
+    let markdownToRender = body.value;
+    
+    // 替换所有 local:// URL 为对应的 Data URL
+    markdownToRender = markdownToRender.replace(
+      /!\[([^\]]*)\]\(local:\/\/([^)]+)\)/g,
+      (match, alt, imageId) => {
+        // 从 images 中查找对应的图片
+        const asset = images.value.find(img => img.id === imageId);
+        if (asset && asset.blobUrl) {
+          // 使用 Data URL 替换
+          return `![${alt}](${asset.blobUrl})`;
+        }
+        // 找不到对应图片，保持原样
+        return match;
+      }
+    );
+    
+    return renderMarkdownPreview(markdownToRender);
+  }
   catch { return '<pre class="error-hint">Markdown 解析失败</pre>'; }
 });
 
@@ -352,6 +739,26 @@ watch(previewHtml, async () => {
     } catch {
       // Mermaid 渲染失败，静默处理
     }
+  }
+});
+
+// 监听 body 变化，同步图片资源列表
+// 当用户从 markdown 中删除图片引用时，自动从资源列表中移除对应图片
+watch(body, (newBody) => {
+  if (!images.value.length) return;
+  
+  // 提取 markdown 中所有图片 URL
+  const usedUrls = new Set(extractImageUrlsFromMarkdown(newBody));
+  
+  // 过滤掉不再被引用的图片
+  const filteredImages = images.value.filter(img => {
+    // 检查图片的 url 或 blobUrl 是否仍在 markdown 中被引用
+    return usedUrls.has(img.url) || (img.blobUrl && usedUrls.has(img.blobUrl));
+  });
+  
+  // 只有当有图片被移除时才更新
+  if (filteredImages.length !== images.value.length) {
+    images.value = filteredImages;
   }
 });
 
@@ -474,10 +881,25 @@ function showValidationError(msg: string) {
 async function save() {
   if (!title.value.trim()) { showValidationError('请输入文章标题'); return false; }
   if (!body.value.trim()) { showValidationError('请输入文章正文'); return false; }
+  
+  // 合并现有图片资源和新粘贴的图片
+  const allAssets = images.value.map(img => ({
+    id: img.id,
+    type: img.type || 'image',
+    url: img.url,
+    alt: img.alt,
+    title: img.title,
+    mimeType: img.mimeType,
+    size: img.size,
+    blobUrl: img.blobUrl,
+    width: img.width,
+    height: img.height,
+  }));
+  
   if (!id.value || id.value === 'new') {
     const now = Date.now();
     const newId = crypto.randomUUID?.() || `${now}-${Math.random().toString(36).slice(2, 8)}`;
-    await db.posts.add({ id: newId, version: 1, title: title.value, summary: body.value.slice(0, 200), canonicalUrl: '', createdAt: now, updatedAt: now, body_md: body.value, tags: [], categories: [], assets: [], meta: {} } as any);
+    await db.posts.add({ id: newId, version: 1, title: title.value, summary: body.value.slice(0, 200), canonicalUrl: '', createdAt: now, updatedAt: now, body_md: body.value, tags: [], categories: [], assets: allAssets, meta: {} } as any);
     // 更新当前文章 ID，避免重复创建
     id.value = newId;
     window.location.hash = `editor/${newId}`;
@@ -486,7 +908,7 @@ async function save() {
     showCopySuccess('文章已保存');
     return true;
   }
-  await db.posts.update(id.value, { title: title.value, body_md: body.value, summary: body.value.slice(0, 200), updatedAt: Date.now() } as any);
+  await db.posts.update(id.value, { title: title.value, body_md: body.value, summary: body.value.slice(0, 200), updatedAt: Date.now(), assets: allAssets } as any);
   savedTitle.value = title.value;
   savedBody.value = body.value;
   showCopySuccess('文章已保存');
@@ -507,13 +929,29 @@ async function handleSaveAndLeave() {
   const success = await save();
   if (success && pendingNavigation.value) {
     showUnsavedDialog.value = false;
-    window.location.hash = pendingNavigation.value;
-    pendingNavigation.value = null;
+    
+    // 如果是发布操作，保存后打开发布对话框
+    if (pendingNavigation.value === 'publish') {
+      pendingNavigation.value = null;
+      await loadEnabledAccounts();
+      selectedAccounts.value = [];
+      showPublishDialog.value = true;
+    } else {
+      window.location.hash = pendingNavigation.value;
+      pendingNavigation.value = null;
+    }
   }
 }
 
 function handleDiscardAndLeave() {
   showUnsavedDialog.value = false;
+  
+  // 如果是发布操作且用户选择不保存，则不执行发布
+  if (pendingNavigation.value === 'publish') {
+    pendingNavigation.value = null;
+    return;
+  }
+  
   if (pendingNavigation.value) {
     window.location.hash = pendingNavigation.value;
     pendingNavigation.value = null;
@@ -569,6 +1007,14 @@ function toggleSelectAll() {
 
 async function publish() {
   if (!id.value || id.value === 'new') { await save(); if (!id.value || id.value === 'new') return; }
+  
+  // 检查是否有未保存的修改
+  if (hasUnsavedChanges.value) {
+    pendingNavigation.value = 'publish';
+    showUnsavedDialog.value = true;
+    return;
+  }
+  
   await loadEnabledAccounts();
   selectedAccounts.value = [];
   showPublishDialog.value = true;
@@ -649,8 +1095,21 @@ function setupStorageListener() {
   } catch {}
 }
 
-onMounted(() => { loadSavedDimensions(); load(); document.addEventListener('visibilitychange', handleVisibilityChange); window.addEventListener('beforeunload', handleBeforeUnload); setupStorageListener(); });
-onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisibilityChange); window.removeEventListener('beforeunload', handleBeforeUnload); if (unsubscribeStorageChange) unsubscribeStorageChange(); if (rafId) cancelAnimationFrame(rafId); });
+onMounted(() => { 
+  loadSavedDimensions(); 
+  load(); 
+  document.addEventListener('visibilitychange', handleVisibilityChange); 
+  window.addEventListener('beforeunload', handleBeforeUnload); 
+  window.addEventListener('beforenavigate', handleBeforeNavigate);
+  setupStorageListener(); 
+});
+onUnmounted(() => { 
+  document.removeEventListener('visibilitychange', handleVisibilityChange); 
+  window.removeEventListener('beforeunload', handleBeforeUnload); 
+  window.removeEventListener('beforenavigate', handleBeforeNavigate);
+  if (unsubscribeStorageChange) unsubscribeStorageChange(); 
+  if (rafId) cancelAnimationFrame(rafId); 
+});
 </script>
 
 
@@ -671,6 +1130,15 @@ onUnmounted(() => { document.removeEventListener('visibilitychange', handleVisib
 .btn-purple:hover { background: #7c3aed; }
 
 .editor-content { display: flex; flex-direction: column; gap: 0; overflow-y: auto; }
+
+/* Markdown 快捷按钮工具栏 */
+.md-toolbar { display: flex; align-items: center; gap: 4px; padding: 6px 10px; background: #f9fafb; border-bottom: 1px solid #e5e7eb; flex-shrink: 0; }
+.md-toolbar.dark { background: #1f2937; border-bottom-color: #374151; }
+.md-tool-btn { display: flex; align-items: center; justify-content: center; width: 28px; height: 24px; padding: 0; border: 1px solid #d1d5db; border-radius: 4px; background: white; cursor: pointer; font-size: 12px; color: #4b5563; transition: all 0.15s ease; }
+.md-tool-btn:hover { background: #f3f4f6; border-color: #9ca3af; color: #1f2937; }
+.md-tool-btn:active { background: #e5e7eb; transform: scale(0.95); }
+.md-toolbar.dark .md-tool-btn { background: #374151; border-color: #4b5563; color: #d1d5db; }
+.md-toolbar.dark .md-tool-btn:hover { background: #4b5563; border-color: #6b7280; color: #f9fafb; }
 
 .source-link { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; font-size: 12px; margin-bottom: 10px; flex-shrink: 0; }
 .source-icon, .source-label { color: #3b82f6; }

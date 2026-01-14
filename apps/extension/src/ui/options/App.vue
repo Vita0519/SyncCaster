@@ -330,6 +330,17 @@ onBeforeUnmount(() => {
 });
 
 function navigate(path: string) {
+  // 触发自定义事件，允许 Editor 等组件拦截导航
+  const event = new CustomEvent('beforenavigate', { 
+    detail: { targetPath: path }, 
+    cancelable: true 
+  });
+  const cancelled = !window.dispatchEvent(event);
+  if (cancelled) {
+    // 导航被拦截，不执行
+    return;
+  }
+  
   currentPath.value = path;
   currentComponent.value = components[path] || DashboardView;
   window.location.hash = path;
@@ -349,6 +360,16 @@ function updateRouteFromHash() {
     return;
   }
   if (components[hash]) {
+    // 触发自定义事件，允许 Editor 等组件拦截导航
+    const event = new CustomEvent('beforenavigate', { 
+      detail: { targetPath: hash }, 
+      cancelable: true 
+    });
+    const cancelled = !window.dispatchEvent(event);
+    if (cancelled) {
+      // 导航被拦截，恢复 hash
+      return;
+    }
     currentPath.value = hash;
     currentComponent.value = components[hash];
     return;

@@ -27,6 +27,15 @@
   margin: 0.75em 0;
 }
 
+/* 图片样式 - 确保大图片适配预览区域 */
+.markdown-preview img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  display: block;
+  margin: 0.75em 0;
+}
+
 .markdown-preview a {
   color: #2563eb;
   text-decoration: underline;

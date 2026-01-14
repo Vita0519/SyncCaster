@@ -5,6 +5,24 @@
  */
 import type { ImageAsset, AssetManifest } from '../types/ast';
 
+// ========== 工具函数 ==========
+
+/**
+ * 检测是否为本地图片 URL (blob:, data:image, 或 local://)
+ */
+export function isLocalImageUrl(url: string): boolean {
+  if (!url || typeof url !== 'string') return false;
+  return url.startsWith('blob:') || url.startsWith('data:image') || url.startsWith('local://');
+}
+
+/**
+ * 从 local:// URL 中提取图片 ID
+ */
+export function extractImageIdFromLocalUrl(url: string): string | null {
+  if (!url || !url.startsWith('local://')) return null;
+  return url.slice('local://'.length);
+}
+
 // ========== 类型定义 ==========
 
 /**
@@ -250,6 +268,22 @@ export class ImageUploadPipeline {
     const results: ImageAsset[] = [];
     let completed = 0;
 
+    // 创建 asset lookup Map，用于快速解析 local:// URL
+    // Key: 图片 ID, Value: Data URL
+    const assetLookupMap = new Map<string, string>();
+    for (const img of images) {
+      if (img.originalUrl.startsWith('local://') && img.metadata?.dataUrl) {
+        const assetId = extractImageIdFromLocalUrl(img.originalUrl);
+        if (assetId) {
+          assetLookupMap.set(assetId, img.metadata.dataUrl);
+        }
+      }
+    }
+
+    const assetLookup = (id: string): string | null => {
+      return assetLookupMap.get(id) || null;
+    };
+
     const queue = [...images];
     const workers = Array.from({ length: this.options.concurrency }, async () => {
       while (queue.length > 0) {
@@ -264,7 +298,14 @@ export class ImageUploadPipeline {
         }
 
         try {
-          const blob = await this.fetchImage(image.originalUrl);
+          // 对于 local:// URL，直接使用 image 自身的 metadata.dataUrl
+          // 这样避免了在 assetLookup 中查找自己的问题
+          let blob: Blob;
+          if (image.originalUrl.startsWith('local://') && image.metadata?.dataUrl) {
+            blob = await this.fetchLocalImage(image.metadata.dataUrl);
+          } else {
+            blob = await this.fetchImage(image.originalUrl, assetLookup);
+          }
           image.localBlob = blob;
           image.metadata.size = blob.size;
           image.status = 'ready';
@@ -291,8 +332,31 @@ export class ImageUploadPipeline {
 
   /**
    * 获取图片 Blob
+   * @param url 图片 URL
+   * @param assetLookup 可选的资源查找函数，用于解析 local:// URL
    */
-  private async fetchImage(url: string): Promise<Blob> {
+  private async fetchImage(url: string, assetLookup?: (id: string) => string | null): Promise<Blob> {
+    // 处理 local:// URL - 需要从 assets 中查找实际的 Data URL
+    if (url.startsWith('local://')) {
+      const imageId = extractImageIdFromLocalUrl(url);
+      if (!imageId) {
+        throw new Error(`Invalid local URL: ${url}`);
+      }
+      
+      // 尝试从 assetLookup 获取实际的 Data URL
+      const dataUrl = assetLookup?.(imageId);
+      if (!dataUrl) {
+        throw new Error(`Cannot find asset for local URL: ${url}`);
+      }
+      
+      return await this.fetchLocalImage(dataUrl);
+    }
+    
+    // 处理本地 URL (blob: 或 data:)
+    if (isLocalImageUrl(url)) {
+      return await this.fetchLocalImage(url);
+    }
+    
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.options.timeout);
 
@@ -313,6 +377,60 @@ export class ImageUploadPipeline {
       return await this.fetchImageViaCanvas(url);
     } finally {
       clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * 获取本地图片 (blob: 或 data: URL)
+   */
+  private async fetchLocalImage(url: string): Promise<Blob> {
+    if (url.startsWith('blob:')) {
+      // Blob URL: 直接 fetch
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch blob URL: ${response.status}`);
+      }
+      return await response.blob();
+    }
+    
+    if (url.startsWith('data:')) {
+      // Data URL: 解析并转换为 Blob
+      return this.dataUrlToBlob(url);
+    }
+    
+    throw new Error(`Unsupported local URL format: ${url.slice(0, 20)}...`);
+  }
+
+  /**
+   * 将 Data URL 转换为 Blob
+   */
+  private dataUrlToBlob(dataUrl: string): Blob {
+    const parts = dataUrl.split(',');
+    if (parts.length !== 2) {
+      throw new Error('Invalid data URL format');
+    }
+    
+    const meta = parts[0];
+    const data = parts[1];
+    
+    // 解析 MIME 类型
+    const mimeMatch = meta.match(/data:([^;]+)/);
+    const mimeType = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+    
+    // 检查是否为 base64 编码
+    const isBase64 = meta.includes('base64');
+    
+    if (isBase64) {
+      const binary = atob(data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return new Blob([bytes], { type: mimeType });
+    } else {
+      // URL 编码
+      const decoded = decodeURIComponent(data);
+      return new Blob([decoded], { type: mimeType });
     }
   }
 

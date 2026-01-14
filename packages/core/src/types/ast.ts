@@ -19,6 +19,7 @@ export interface ImageAsset {
     size: number;
     alt?: string;
     title?: string;
+    dataUrl?: string;            // Data URL for local:// references
   };
 
   optimized?: {

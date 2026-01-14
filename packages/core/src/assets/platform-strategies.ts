@@ -227,6 +227,73 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
       url: data.url || data.imgUrl,
     }),
   },
+
+  /**
+   * Toutiao (mp.toutiao.com)
+   */
+  toutiao: {
+    mode: 'domPasteUpload',
+    constraints: WEBP_CONSTRAINTS,
+    domPasteConfig: {
+      editorUrl: 'https://mp.toutiao.com/profile_v4/graphic/publish',
+      editorSelector: '.ProseMirror, [contenteditable="true"]',
+      timeoutMs: 40000,
+    },
+  },
+
+  /**
+   * InfoQ (xie.infoq.cn)
+   */
+  infoq: {
+    mode: 'domPasteUpload',
+    constraints: WEBP_CONSTRAINTS,
+    domPasteConfig: {
+      // 实际发布会在草稿页，但这里提供一个可打开的同源入口作为兜底。
+      editorUrl: 'https://xie.infoq.cn/',
+      editorSelector: '.CodeMirror, .gk-editor, [contenteditable="true"]',
+      timeoutMs: 45000,
+    },
+  },
+
+  /**
+   * Baijiahao (baijiahao.baidu.com)
+   */
+  baijiahao: {
+    mode: 'domPasteUpload',
+    constraints: DEFAULT_CONSTRAINTS,
+    domPasteConfig: {
+      editorUrl: 'https://baijiahao.baidu.com/builder/rc/edit',
+      // UEditor 正文通常在 iframe 内，编辑区 body 会是 contenteditable
+      editorSelector: 'body[contenteditable="true"], body[contenteditable=true]',
+      timeoutMs: 45000,
+    },
+  },
+
+  /**
+   * Wangyihao (mp.163.com)
+   */
+  wangyihao: {
+    mode: 'domPasteUpload',
+    constraints: WEBP_CONSTRAINTS,
+    domPasteConfig: {
+      editorUrl: 'https://mp.163.com/#/article-publish',
+      editorSelector: '.DraftEditor-root, .public-DraftEditor-content, [role="textbox"][contenteditable="true"]',
+      timeoutMs: 45000,
+    },
+  },
+
+  /**
+   * Medium
+   */
+  medium: {
+    mode: 'domPasteUpload',
+    constraints: WEBP_CONSTRAINTS,
+    domPasteConfig: {
+      editorUrl: 'https://medium.com/new-story',
+      editorSelector: '[data-testid="body"], [data-testid="editor"], article',
+      timeoutMs: 45000,
+    },
+  },
 };
 
 // ========== Helpers ==========

@@ -54,6 +54,7 @@ export async function appendJobLog(jobId: string, entry: Omit<LogEntry, 'id' | '
 }
 
 type DownloadedImage = { url: string; base64: string; mimeType: string };
+type ImageInput = string | AssetManifest['images'][number];
 
 // 同一个 job 可能会并发发布多个平台：图片下载可复用，避免重复下载拖慢整体速度
 const jobDownloadedImagesCache = new Map<
@@ -217,11 +218,49 @@ export async function publishToTarget(
     }
 
     const manifest = buildAssetManifest(processedPost);
+    const hasLocalPasteImages = manifest.images.some((img) => img.originalUrl.startsWith('local://'));
     let strategy = getImageStrategy(target.platform);
 
-    // CSDN：使用 Markdown 编辑器直接粘贴即可，图片外链通常可用；为提升首屏填充速度，这里跳过图片预处理。
-    if (target.platform === 'csdn') {
+    // CSDN：图片外链通常可用；为提升首屏填充速度，默认跳过图片预处理。
+    // 但 local:// 粘贴图片只能在发布时上传转链，否则平台无法识别。
+    if (target.platform === 'csdn' && !hasLocalPasteImages) {
       strategy = null;
+    }
+
+    // InfoQ：需要先创建草稿才能进入编辑页；为了让图片上传命中真实编辑器，这里提前创建草稿并更新 domTargetUrl。
+    if (
+      target.platform === 'infoq' &&
+      domAutomation &&
+      (domAutomation as any).createDraft &&
+      domTargetUrl &&
+      !/\/draft\//i.test(domTargetUrl)
+    ) {
+      await jobLogger({ level: 'info', step: 'dom', message: 'InfoQ: 预创建草稿（用于图片上传与后续填充）' });
+      try {
+        // 确保同源页面已打开（用于携带 cookie）
+        await openOrReuseTab(domTargetUrl, { active: activeTab, reuseKey: domReuseKey, addToSyncGroup: true });
+        await new Promise((r) => setTimeout(r, 1500));
+
+        const draftResult = await executeInOrigin<{ success: boolean; draftUrl?: string; error?: string }>(
+          domTargetUrl,
+          (domAutomation as any).createDraft as any,
+          [],
+          { closeTab: false, active: activeTab, reuseKey: domReuseKey },
+        );
+
+        if (draftResult?.success && draftResult?.draftUrl) {
+          domTargetUrl = draftResult.draftUrl;
+          await openOrReuseTab(domTargetUrl, { active: activeTab, reuseKey: domReuseKey, addToSyncGroup: true });
+          await jobLogger({ level: 'info', step: 'dom', message: 'InfoQ: 草稿创建成功', meta: { draftUrl: domTargetUrl } });
+        } else {
+          const msg = draftResult?.error || '未知错误';
+          await jobLogger({ level: 'error', step: 'dom', message: `InfoQ: 预创建草稿失败 - ${msg}` });
+          throw new Error(`InfoQ 创建草稿失败: ${msg}`);
+        }
+      } catch (e: any) {
+        await jobLogger({ level: 'error', step: 'dom', message: 'InfoQ: 预创建草稿异常', meta: { error: e?.message } });
+        throw e;
+      }
     }
     
     // 处理图片：若目标平台不接受外链，需先上传并替换 URL。
@@ -234,23 +273,28 @@ export async function publishToTarget(
       (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu' || target.platform === 'tencent-cloud');
 
     const prefillBeforeImageProcessing =
-      adapter.kind === 'dom' && (target.platform === 'bilibili' || target.platform === 'csdn' || target.platform === 'oschina');
+      adapter.kind === 'dom' && (target.platform === 'bilibili' || target.platform === 'oschina');
 
-    if (!prefillBeforeImageProcessing && manifest.images.length > 0 && strategy && strategy.mode !== 'externalUrlOnly') {
+    const imagesToProcess =
+      target.platform === 'csdn'
+        ? manifest.images.filter((img) => img.originalUrl.startsWith('local://'))
+        : manifest.images;
+
+    if (!prefillBeforeImageProcessing && imagesToProcess.length > 0 && strategy && strategy.mode !== 'externalUrlOnly') {
       await jobLogger({
         level: 'info',
         step: 'upload_images',
-        message: `发现 ${manifest.images.length} 张图片需要处理`,
+        message: `发现 ${imagesToProcess.length} 张图片需要处理`,
       });
 
       if (needsDownloadedImagesForDomFill) {
         try {
           cleanupJobImagesCache();
-          const urls = manifest.images.map((img) => img.originalUrl);
+          const imagesToDownload = imagesToProcess;
           const cacheKey = getJobImagesCacheKey(jobId);
           let cached = jobDownloadedImagesCache.get(cacheKey);
           if (!cached) {
-            const promise = downloadImagesInBackground(urls, (progress) => {
+            const promise = downloadImagesInBackground(imagesToDownload, (progress) => {
               jobLogger({
                 level: 'info',
                 step: 'upload_images',
@@ -269,7 +313,7 @@ export async function publishToTarget(
           await jobLogger({
             level: 'info',
             step: 'upload_images',
-            message: `图片下载完成: ${downloadedImages.length}/${manifest.images.length}`,
+            message: `图片下载完成: ${downloadedImages.length}/${imagesToProcess.length}`,
           });
         } catch (imgError: any) {
           console.error('[publish-engine] 图片下载失败', imgError);
@@ -283,7 +327,7 @@ export async function publishToTarget(
       } else {
         try {
           const imageResult = await uploadImagesInPlatform(
-            manifest.images.map((img) => img.originalUrl),
+            imagesToProcess,
             target.platform,
             strategy,
             (progress) => {
@@ -379,7 +423,8 @@ export async function publishToTarget(
         }
 
         // InfoQ 等平台需要先在页面上下文中创建草稿，然后跳转到草稿编辑页
-        if (dom.createDraft && target.platform === 'infoq') {
+        // 若前面已预创建草稿（domTargetUrl 已是 /draft/xxx），这里跳过避免重复创建。
+        if (dom.createDraft && target.platform === 'infoq' && !/\/draft\//i.test(targetUrl)) {
           await jobLogger({ level: 'info', step: 'dom', message: 'InfoQ: 正在创建草稿...' });
           try {
             // 先打开 InfoQ 首页（用于获取 cookie）
@@ -438,7 +483,7 @@ export async function publishToTarget(
            await jobLogger({ level: 'info', step: 'upload_images', message: `发现 ${manifest.images.length} 张图片需要处理` });
            try {
              const imageResult = await uploadImagesInPlatform(
-               manifest.images.map((img) => img.originalUrl),
+               manifest.images,
                target.platform,
                strategy,
                (progress) => {
@@ -557,7 +602,7 @@ export async function publishToTarget(
              const inTabUrl = tabInfo?.url || targetUrl;
 
              const imageResult = await uploadImagesInPlatform(
-               manifest.images.map((img) => img.originalUrl),
+               manifest.images,
                target.platform,
                strategy,
                (progress) => {
@@ -871,20 +916,61 @@ async function fetchImageWithBestEffort(url: string): Promise<Response> {
   throw lastError || new Error('image download failed');
 }
 
+function guessMimeTypeFromDataUrl(dataUrl: string): string | null {
+  const m = /^data:([^;,]+)[;,]/i.exec(String(dataUrl || ''));
+  return m?.[1] || null;
+}
+
+function resolveImageInput(input: ImageInput): { originalUrl: string; dataUrl?: string } {
+  if (typeof input === 'string') {
+    return { originalUrl: input };
+  }
+  return { originalUrl: input.originalUrl, dataUrl: input.metadata?.dataUrl };
+}
 
 /**
  * 在 background 中下载图片（绕过 CORS/防盗链）
  */
 async function downloadImagesInBackground(
-  imageUrls: string[],
+  images: ImageInput[],
   onProgress?: (progress: { completed: number; total: number }) => void
 ): Promise<{ url: string; base64: string; mimeType: string }[]> {
   const downloadedImages: { url: string; base64: string; mimeType: string }[] = [];
 
-  for (let i = 0; i < imageUrls.length; i++) {
-    const url = imageUrls[i];
+  for (let i = 0; i < images.length; i++) {
+    const { originalUrl: url, dataUrl } = resolveImageInput(images[i]);
     try {
-      console.log(`[publish-engine] 下载图片 ${i + 1}/${imageUrls.length}: ${url}`);
+      console.log(`[publish-engine] 下载图片 ${i + 1}/${images.length}: ${url}`);
+
+      // local:// 粘贴图片：使用文章 assets 中存储的 Data URL（无需网络下载）
+      if (url.startsWith('local://')) {
+        if (!dataUrl || !dataUrl.startsWith('data:')) {
+          console.warn('[publish-engine] local:// 图片缺少 dataUrl，跳过下载', { url });
+          continue;
+        }
+
+        downloadedImages.push({
+          url,
+          base64: dataUrl,
+          mimeType: guessMimeTypeFromDataUrl(dataUrl) || 'image/png',
+        });
+
+        onProgress?.({ completed: i + 1, total: images.length });
+        continue;
+      }
+
+      // data: URL：直接透传（无需网络下载）
+      if (url.startsWith('data:')) {
+        downloadedImages.push({
+          url,
+          base64: url,
+          mimeType: guessMimeTypeFromDataUrl(url) || 'image/png',
+        });
+
+        onProgress?.({ completed: i + 1, total: images.length });
+        continue;
+      }
+
       const response = await fetchImageWithBestEffort(url);
 
       if (!response.ok) {
@@ -901,7 +987,7 @@ async function downloadImagesInBackground(
         mimeType: blob.type || 'image/png',
       });
 
-      onProgress?.({ completed: i + 1, total: imageUrls.length });
+      onProgress?.({ completed: i + 1, total: images.length });
     } catch (error) {
       console.error(`[publish-engine] 下载异常: ${url}`, error);
     }
@@ -933,6 +1019,11 @@ const PLATFORM_URLS: Record<string, string> = {
   bilibili: 'https://member.bilibili.com/platform/upload/text/edit',
   // 开源中国发文页面
   oschina: 'https://my.oschina.net/blog/write',
+  toutiao: 'https://mp.toutiao.com/profile_v4/graphic/publish',
+  infoq: 'https://xie.infoq.cn/',
+  baijiahao: 'https://baijiahao.baidu.com/builder/rc/edit',
+  wangyihao: 'https://mp.163.com/#/article-publish',
+  medium: 'https://medium.com/new-story',
 };
 
 function toDomOpenUrl(matcherOrUrl: string) {
@@ -951,7 +1042,7 @@ function toDomOpenUrl(matcherOrUrl: string) {
  * 3. 在目标平台页面中上传图片 - 利用用户的登录状态
  */
 async function uploadImagesInPlatform(
-  imageUrls: string[],
+  images: ImageInput[],
   platformId: string,
   strategy: any,
   onProgress?: (progress: { completed: number; total: number }) => void,
@@ -970,18 +1061,48 @@ async function uploadImagesInPlatform(
     console.log(`[publish-engine] 未知平台 ${platformId}，跳过图片上传`);
     return {
       urlMapping: new Map(),
-      stats: { total: imageUrls.length, success: 0, failed: imageUrls.length },
+      stats: { total: images.length, success: 0, failed: images.length },
     };
   }
 
-  console.log(`[publish-engine] 准备上传 ${imageUrls.length} 张图片到 ${platformId}`);
+  console.log(`[publish-engine] 准备上传 ${images.length} 张图片到 ${platformId}`);
   console.log('[publish-engine] 步骤1: 在 background 中下载图片...');
   const downloadedImages: { url: string; base64: string; mimeType: string }[] = [];
 
-  for (let i = 0; i < imageUrls.length; i++) {
-    const url = imageUrls[i];
+  for (let i = 0; i < images.length; i++) {
+    const { originalUrl: url, dataUrl } = resolveImageInput(images[i]);
     try {
-      console.log(`[publish-engine] 下载图片 ${i + 1}/${imageUrls.length}: ${url}`);
+      console.log(`[publish-engine] 下载图片 ${i + 1}/${images.length}: ${url}`);
+
+      // local:// 粘贴图片：使用文章 assets 中存储的 Data URL（无需网络下载）
+      if (url.startsWith('local://')) {
+        if (!dataUrl || !dataUrl.startsWith('data:')) {
+          console.warn('[publish-engine] local:// 图片缺少 dataUrl，跳过上传', { url });
+          continue;
+        }
+
+        downloadedImages.push({
+          url,
+          base64: dataUrl,
+          mimeType: guessMimeTypeFromDataUrl(dataUrl) || 'image/png',
+        });
+
+        onProgress?.({ completed: i + 1, total: images.length * 2 });
+        continue;
+      }
+
+      // data: URL：直接透传（无需网络下载）
+      if (url.startsWith('data:')) {
+        downloadedImages.push({
+          url,
+          base64: url,
+          mimeType: guessMimeTypeFromDataUrl(url) || 'image/png',
+        });
+
+        onProgress?.({ completed: i + 1, total: images.length * 2 });
+        continue;
+      }
+
       const response = await fetchImageWithBestEffort(url);
 
       if (!response.ok) {
@@ -998,7 +1119,7 @@ async function uploadImagesInPlatform(
         mimeType: blob.type || 'image/png',
       });
 
-      onProgress?.({ completed: i + 1, total: imageUrls.length * 2 });
+      onProgress?.({ completed: i + 1, total: images.length * 2 });
     } catch (error) {
       console.error(`[publish-engine] 下载异常: ${url}`, error);
     }
@@ -1008,7 +1129,7 @@ async function uploadImagesInPlatform(
     console.log('[publish-engine] 没有成功下载任何图片');
     return {
       urlMapping: new Map(),
-      stats: { total: imageUrls.length, success: 0, failed: imageUrls.length },
+      stats: { total: images.length, success: 0, failed: images.length },
     };
   }
 
@@ -1822,18 +1943,18 @@ async function uploadImagesInPlatform(
       } else {
         failed++;
       }
-      onProgress?.({ completed: success + failed, total: imageUrls.length });
+      onProgress?.({ completed: success + failed, total: images.length });
     }
 
     return {
       urlMapping,
-      stats: { total: imageUrls.length, success, failed },
+      stats: { total: images.length, success, failed },
     };
   } catch (error: any) {
     console.error('[publish-engine] 图片上传执行失败', error);
     return {
       urlMapping: new Map(),
-      stats: { total: imageUrls.length, success: 0, failed: imageUrls.length },
+      stats: { total: images.length, success: 0, failed: images.length },
     };
   }
 }
@@ -1905,6 +2026,23 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
   const images: AssetManifest['images'] = [];
   const seen = new Set<string>();
 
+  // 构建 asset 查找表，用于解析 local:// URL
+  const assetMap = new Map<string, (typeof post.assets extends (infer T)[] | undefined ? T : never)>();
+  if (post.assets) {
+    for (const asset of post.assets) {
+      if (asset.type === 'image') {
+        // 使用 url 作为 key（对于 local:// URL）
+        if (asset.url) {
+          assetMap.set(asset.url, asset);
+        }
+        // 也使用 id 作为 key
+        if (asset.id) {
+          assetMap.set(`local://${asset.id}`, asset);
+        }
+      }
+    }
+  }
+
   // 从 Markdown 内容提取图片
   if (post.body_md) {
     const mdImageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
@@ -1928,6 +2066,14 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
       const url = inner.replace(/\s+/g, '');
       if (url && !seen.has(url) && isExternalImage(url)) {
         seen.add(url);
+        
+        // 对于 local:// URL，从 assets 中查找对应的 Data URL
+        let dataUrl: string | undefined;
+        if (url.startsWith('local://')) {
+          const asset = assetMap.get(url);
+          dataUrl = asset?.blobUrl;
+        }
+        
         images.push({
           id: `img-${images.length}`,
           originalUrl: url,
@@ -1935,6 +2081,7 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
             format: guessImageFormat(url),
             size: 0,
             alt: match[1] || undefined,
+            dataUrl, // 存储实际的 Data URL
           },
           status: 'pending',
         });
@@ -1942,7 +2089,7 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
     }
   }
 
-  // 如果文章已有 assets，合并
+  // 如果文章已有 assets，合并（跳过已经从 markdown 中提取的）
   if (post.assets) {
     for (const asset of post.assets) {
       // AssetRef 使用 url 字段
@@ -1953,8 +2100,10 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
           originalUrl: asset.url,
           metadata: {
             format: guessImageFormat(asset.url),
-            size: 0,
+            size: asset.size || 0,
             alt: asset.alt,
+            // 对于 local:// URL，存储实际的 Data URL 以便后续解析
+            dataUrl: asset.url.startsWith('local://') ? asset.blobUrl : undefined,
           },
           status: 'pending',
         });
@@ -1974,8 +2123,11 @@ function buildAssetManifest(post: CanonicalPost): AssetManifest {
 function isExternalImage(url: string): boolean {
   if (!url) return false;
   
-  // 跳过 data URL
+  // 跳过 data URL（太长，不需要再处理）
   if (url.startsWith('data:')) return false;
+  
+  // local:// URL 需要处理（粘贴的本地图片）
+  if (url.startsWith('local://')) return true;
   
   // 跳过相对路径
   if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
