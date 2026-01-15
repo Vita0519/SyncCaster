@@ -270,7 +270,7 @@ export async function publishToTarget(
     const needsDownloadedImagesForDomFill =
       adapter.kind === 'dom' &&
       ((strategy?.mode === 'domPasteUpload' &&
-        (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu' || target.platform === 'tencent-cloud' || target.platform === 'baijiahao' || target.platform === '51cto' || target.platform === 'zhihu' || target.platform === 'oschina' || target.platform === 'wangyihao' || target.platform === 'csdn')) ||
+        (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu' || target.platform === 'tencent-cloud' || target.platform === 'baijiahao' || target.platform === '51cto' || target.platform === 'zhihu' || target.platform === 'oschina' || target.platform === 'wangyihao' || target.platform === 'csdn' || target.platform === 'toutiao')) ||
        target.platform === 'segmentfault');
 
     const prefillBeforeImageProcessing =
