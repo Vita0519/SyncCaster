@@ -559,11 +559,190 @@ export const csdnAdapter: PlatformAdapter = {
         }
       };
 
+      // ========== 图片处理辅助函数 ==========
+
+      // 将 base64 转换为 Blob
+      const dataUrlToBlob = (dataUrl: string): Blob => {
+        const parts = dataUrl.split(',');
+        if (parts.length !== 2) {
+          throw new Error('Invalid data URL format');
+        }
+        const meta = parts[0];
+        const base64Data = parts[1];
+        const mimeMatch = meta.match(/data:([^;]+)/);
+        const mimeType = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+        const binaryString = atob(base64Data);
+        const bytes = new Uint8Array(binaryString.length);
+        for (let i = 0; i < binaryString.length; i++) {
+          bytes[i] = binaryString.charCodeAt(i);
+        }
+        return new Blob([bytes], { type: mimeType });
+      };
+
+      // 收集编辑器中的所有图片 URL
+      const collectImageUrls = (root: HTMLElement): string[] => {
+        const urls: string[] = [];
+        root.querySelectorAll('img').forEach(img => {
+          if (img.src) urls.push(img.src);
+        });
+        return urls;
+      };
+
+      // 等待新图片 URL 出现
+      const waitForNewImageUrl = (
+        root: HTMLElement,
+        beforeUrls: Set<string>,
+        timeoutMs: number
+      ): Promise<{ url: string | null }> => {
+        return new Promise((resolve) => {
+          let timer: ReturnType<typeof setTimeout>;
+
+          const checkOnce = (): boolean => {
+            const imgs = root.querySelectorAll('img');
+            for (const img of imgs) {
+              const url = img.src;
+              if (!url || beforeUrls.has(url)) continue;
+              // 找到新的图片 URL（CSDN 图床 URL 或 blob URL）
+              if (url.includes('csdnimg.cn') || url.includes('csdn.net') || url.startsWith('blob:')) {
+                observer.disconnect();
+                if (timer) clearTimeout(timer);
+                console.log('[csdn] Found new image URL:', url);
+                resolve({ url });
+                return true;
+              }
+            }
+            return false;
+          };
+
+          const observer = new MutationObserver(() => checkOnce());
+          observer.observe(root, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['src']
+          });
+
+          if (checkOnce()) return;
+
+          timer = setTimeout(() => {
+            observer.disconnect();
+            console.log('[csdn] waitForNewImageUrl timeout');
+            resolve({ url: null });
+          }, timeoutMs);
+        });
+      };
+
+      // 在编辑器中查找并替换占位符
+      const findAndReplacePlaceholder = async (
+        editorRoot: HTMLElement,
+        placeholder: string,
+        imageData: { base64: string; mimeType: string }
+      ): Promise<boolean> => {
+        // 使用 TreeWalker 遍历所有文本节点
+        const walker = document.createTreeWalker(
+          editorRoot,
+          NodeFilter.SHOW_TEXT,
+          null
+        );
+
+        let node: Text | null;
+        while ((node = walker.nextNode() as Text)) {
+          const text = node.textContent || '';
+          const index = text.indexOf(placeholder);
+          if (index !== -1) {
+            console.log('[csdn] Found placeholder:', placeholder, 'in text:', text.substring(0, 50));
+
+            try {
+              // 1. 选中占位符
+              const range = document.createRange();
+              range.setStart(node, index);
+              range.setEnd(node, index + placeholder.length);
+
+              const selection = window.getSelection();
+              selection?.removeAllRanges();
+              selection?.addRange(range);
+              await sleep(100);
+
+              // 2. 删除占位符
+              document.execCommand('delete', false);
+              await sleep(100);
+
+              // 3. 在该位置粘贴图片
+              const blob = dataUrlToBlob(imageData.base64);
+              const ext = imageData.mimeType.includes('png') ? 'png' : imageData.mimeType.includes('gif') ? 'gif' : 'jpg';
+              const file = new File([blob], `image_${Date.now()}.${ext}`, { type: imageData.mimeType });
+
+              const dt = new DataTransfer();
+              dt.items.add(file);
+
+              // 记录粘贴前的图片 URL
+              const beforeUrls = new Set(collectImageUrls(editorRoot));
+
+              // 尝试 paste 事件
+              const pasteEvent = new ClipboardEvent('paste', {
+                bubbles: true,
+                cancelable: true,
+                clipboardData: dt
+              });
+              Object.defineProperty(pasteEvent, 'clipboardData', { get: () => dt });
+              editorRoot.dispatchEvent(pasteEvent);
+
+              // 4. 等待图片上传
+              console.log('[csdn] Waiting for image upload...');
+              const result = await waitForNewImageUrl(editorRoot, beforeUrls, 20000);
+
+              if (result.url) {
+                console.log('[csdn] Image uploaded successfully:', result.url);
+              } else {
+                console.warn('[csdn] Image upload may have failed for placeholder:', placeholder);
+              }
+
+              return true;
+            } catch (e) {
+              console.error('[csdn] Error replacing placeholder:', placeholder, e);
+              return false;
+            }
+          }
+        }
+
+        console.warn('[csdn] Placeholder not found:', placeholder);
+        return false;
+      };
+
       try {
         console.log('[csdn-fill] Starting fill process...');
         console.log('[csdn-fill] URL:', window.location.href);
         console.log('[csdn-fill] isMarkdownEditorPage:', isMarkdownEditorPage());
-        
+
+        // ========== 图片占位符处理 ==========
+        // 获取下载的图片数据
+        const downloadedImages = (payload as any).__downloadedImages as Array<{ url: string; base64: string; mimeType: string }> | undefined;
+        const imagePlaceholders = new Map<string, { base64: string; mimeType: string }>();
+        let markdownProcessed = String((payload as any).contentMarkdown || '');
+
+        if (downloadedImages && downloadedImages.length > 0) {
+          console.log('[csdn] 处理图片 - 使用占位符替代 local:// 图片链接', { count: downloadedImages.length });
+
+          let imageIndex = 0;
+          for (const img of downloadedImages) {
+            if (img.url.startsWith('local://')) {
+              imageIndex++;
+              const placeholder = `【图片${imageIndex}】`;
+              imagePlaceholders.set(placeholder, { base64: img.base64, mimeType: img.mimeType });
+
+              // 替换 Markdown 中的图片链接为占位符
+              const mdPattern = new RegExp(
+                `!\\[[^\\]]*\\]\\(\\s*${img.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\)`,
+                'g'
+              );
+              markdownProcessed = markdownProcessed.replace(mdPattern, placeholder);
+              console.log('[csdn] Replaced image with placeholder:', img.url, '->', placeholder);
+            }
+          }
+
+          console.log('[csdn] Created', imagePlaceholders.size, 'image placeholders');
+        }
+
         // 1) 标题
         const titleField = await waitFor(() => findTitleField(), 25000);
         const title = String((payload as any).title || '');
@@ -577,11 +756,12 @@ export const csdnAdapter: PlatformAdapter = {
         }
         console.log('[csdn-fill] Title filled');
 
-        // 2) 正文
-        const markdown = String((payload as any).contentMarkdown || '');
+        // 2) 正文 - 使用处理后的 Markdown（已将 local:// 图片替换为占位符）
+        const markdown = markdownProcessed;
         const html = String((payload as any).contentHtml || '');
         const fallbackText = html ? htmlToPlainText(html) || markdown : markdown;
         console.log('[csdn-fill] Content length:', markdown.length);
+        console.log('[csdn-fill] Image placeholders count:', imagePlaceholders.size);
 
         // 等待编辑器出现
         const editorSelectors = '.CodeMirror, .monaco-editor, .cm-content, .cm-editor, textarea, .ProseMirror, .ql-editor, [contenteditable="true"]';
@@ -624,6 +804,35 @@ export const csdnAdapter: PlatformAdapter = {
           console.log('[csdn-fill] Trying rich editor fallback');
           const editor = await waitFor(() => findBestRichEditor(), 25000);
           await fillRichEditor(editor, html, fallbackText);
+        }
+
+        // ========== 在占位符位置插入图片 ==========
+        if (imagePlaceholders.size > 0) {
+          console.log('[csdn] 开始在占位符位置插入图片', { count: imagePlaceholders.size });
+
+          // 等待内容渲染完成
+          await sleep(1000);
+
+          // 获取编辑器元素
+          const editorForImages = queryAllDeep('[contenteditable="true"], .cm-content, .CodeMirror, textarea')
+            .map((e) => e as HTMLElement)
+            .filter((e) => isVisible(e) && !isLikelyTitle(e) && getRectArea(e) > 10000)
+            .sort((a, b) => getRectArea(b) - getRectArea(a))[0];
+
+          if (editorForImages) {
+            console.log('[csdn] Found editor for images:', editorForImages.tagName, editorForImages.className);
+
+            // 逐个处理占位符
+            for (const [placeholder, imageData] of imagePlaceholders) {
+              console.log('[csdn] Processing placeholder:', placeholder);
+              await findAndReplacePlaceholder(editorForImages, placeholder, imageData);
+              await sleep(500);
+            }
+
+            console.log('[csdn] All image placeholders processed');
+          } else {
+            console.warn('[csdn] No editor found for image insertion');
+          }
         }
 
         // 内容填充完成，不执行发布操作

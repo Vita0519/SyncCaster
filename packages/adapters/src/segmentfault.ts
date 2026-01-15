@@ -241,6 +241,240 @@ export const segmentfaultAdapter: PlatformAdapter = {
       }
 
       try {
+        // 0. 处理本地图片上传
+        const downloadedImages = (payload as any).__downloadedImages as Array<{ url: string; base64: string; mimeType: string }> | undefined;
+        let processedMarkdown = (payload as any).contentMarkdown || '';
+
+        console.log('[segmentfault] 检查本地图片:', {
+          hasDownloadedImages: !!downloadedImages,
+          count: downloadedImages?.length || 0,
+          markdownLength: processedMarkdown.length,
+        });
+
+        if (downloadedImages && downloadedImages.length > 0) {
+          console.log('[segmentfault] 发现', downloadedImages.length, '张本地图片需要上传');
+
+          // 尝试获取 CSRF token（思否可能需要）
+          const getCsrfToken = (): string | null => {
+            // 从 meta 标签获取
+            const metaToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+            if (metaToken) return metaToken;
+
+            // 从 cookie 获取
+            const cookies = document.cookie.split(';');
+            for (const cookie of cookies) {
+              const [name, value] = cookie.trim().split('=');
+              if (name === 'XSRF-TOKEN' || name === '_xsrf' || name === 'csrf_token') {
+                return decodeURIComponent(value);
+              }
+            }
+            return null;
+          };
+
+          const csrfToken = getCsrfToken();
+          console.log('[segmentfault] CSRF token:', csrfToken ? '已获取' : '未找到');
+
+          // 图片上传函数 - 直接使用 DOM 粘贴上传（API 端点已失效）
+          const uploadImageToSegmentfault = async (base64: string, mimeType: string): Promise<string | null> => {
+            try {
+              console.log('[segmentfault] 开始转换 base64 到 Blob, mimeType:', mimeType);
+
+              // 将 base64 转换为 Blob
+              const response = await fetch(base64);
+              const blob = await response.blob();
+              console.log('[segmentfault] Blob 创建成功, size:', blob.size);
+
+              // 直接使用 DOM 粘贴上传
+              return await tryDomPasteUpload(blob, mimeType);
+
+            } catch (e) {
+              console.error('[segmentfault] 图片上传异常:', e);
+              return null;
+            }
+          };
+
+          // DOM 粘贴上传函数 - 参考简书的成功实现
+          const tryDomPasteUpload = async (blob: Blob, mimeType: string): Promise<string | null> => {
+            try {
+              const cm = document.querySelector('.CodeMirror') as any;
+              if (!cm?.CodeMirror) {
+                console.log('[segmentfault] 未找到 CodeMirror 编辑器');
+                return null;
+              }
+
+              const editor = cm.CodeMirror;
+
+              // 辅助函数：提取 Markdown 中的图片 URL
+              const extractImageUrls = (text: string): Set<string> => {
+                const urls = new Set<string>();
+                // 匹配 Markdown 图片语法: ![alt](url)
+                const mdImgRegex = /!\[[^\]]*\]\(([^)]+)\)/g;
+                let match;
+                while ((match = mdImgRegex.exec(text)) !== null) {
+                  if (match[1]) urls.add(match[1]);
+                }
+                // 匹配 HTML img 标签
+                const htmlImgRegex = /<img[^>]+src=["']([^"']+)["']/gi;
+                while ((match = htmlImgRegex.exec(text)) !== null) {
+                  if (match[1]) urls.add(match[1]);
+                }
+                return urls;
+              };
+
+              // 辅助函数：等待新的图片 URL 出现
+              const waitForNewImageUrl = async (
+                beforeUrls: Set<string>,
+                timeoutMs: number
+              ): Promise<string | null> => {
+                const start = Date.now();
+                while (Date.now() - start < timeoutMs) {
+                  const currentContent = editor.getValue() || '';
+                  const currentUrls = extractImageUrls(currentContent);
+
+                  for (const url of currentUrls) {
+                    if (!url) continue;
+                    if (beforeUrls.has(url)) continue;
+                    // 排除 data: 和 blob: 开头的临时 URL
+                    if (url.startsWith('data:') || url.startsWith('blob:')) continue;
+                    // 排除 local:// 开头的本地 URL
+                    if (url.startsWith('local://')) continue;
+                    // 找到新的有效 URL
+                    console.log('[segmentfault] 检测到新图片 URL:', url);
+                    return url;
+                  }
+
+                  await new Promise(r => setTimeout(r, 500));
+                }
+                return null;
+              };
+
+              // 创建 File 对象
+              const ext = mimeType.includes('png') ? 'png' : mimeType.includes('gif') ? 'gif' : 'jpg';
+              const file = new File([blob], `image_${Date.now()}.${ext}`, { type: mimeType });
+
+              // 创建 DataTransfer 对象
+              const dataTransfer = new DataTransfer();
+              dataTransfer.items.add(file);
+
+              // 记录粘贴前的所有图片 URL
+              const beforeContent = editor.getValue() || '';
+              const beforeUrls = extractImageUrls(beforeContent);
+              console.log('[segmentfault] 粘贴前图片 URL 数量:', beforeUrls.size);
+
+              // 聚焦编辑器
+              editor.focus();
+
+              // 方法1: 使用 Object.defineProperty 设置 clipboardData（关键改进）
+              console.log('[segmentfault] 尝试方法1: ClipboardEvent + Object.defineProperty');
+              const pasteEvent = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+              Object.defineProperty(pasteEvent, 'clipboardData', {
+                get: () => dataTransfer,
+                configurable: true
+              });
+
+              // 尝试多个可能的目标元素
+              const targets = [
+                cm.querySelector('.CodeMirror-code'),
+                cm.querySelector('.CodeMirror-scroll'),
+                cm.querySelector('textarea'),
+                cm,
+                document.activeElement,
+              ].filter(Boolean);
+
+              let dispatched = false;
+              for (const target of targets) {
+                try {
+                  dispatched = target.dispatchEvent(pasteEvent);
+                  console.log('[segmentfault] 粘贴事件触发到', target.className || target.tagName, ':', dispatched);
+                  if (dispatched) break;
+                } catch (e) {
+                  console.log('[segmentfault] 粘贴到', target.className || target.tagName, '失败:', e);
+                }
+              }
+
+              // 等待新 URL 出现（最多 15 秒）
+              let newUrl = await waitForNewImageUrl(beforeUrls, 15000);
+              if (newUrl) {
+                console.log('[segmentfault] 方法1成功，新图片 URL:', newUrl);
+                // 清除刚才粘贴的内容（因为我们会在后面统一替换）
+                const currentContent = editor.getValue();
+                const imgPattern = new RegExp(`!\\[[^\\]]*\\]\\(${newUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g');
+                editor.setValue(currentContent.replace(imgPattern, ''));
+                return newUrl;
+              }
+
+              // 方法2: 使用 DragEvent（拖拽事件）
+              console.log('[segmentfault] 方法1未检测到新图片，尝试方法2: DragEvent');
+              const dropDataTransfer = new DataTransfer();
+              dropDataTransfer.items.add(file);
+
+              const dragOverEvent = new DragEvent('dragover', { bubbles: true, cancelable: true });
+              Object.defineProperty(dragOverEvent, 'dataTransfer', { get: () => dropDataTransfer });
+
+              const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true });
+              Object.defineProperty(dropEvent, 'dataTransfer', { get: () => dropDataTransfer });
+
+              for (const target of targets) {
+                try {
+                  target.dispatchEvent(dragOverEvent);
+                  dispatched = target.dispatchEvent(dropEvent);
+                  console.log('[segmentfault] 拖拽事件触发到', target.className || target.tagName, ':', dispatched);
+                  if (dispatched) break;
+                } catch (e) {
+                  console.log('[segmentfault] 拖拽到', target.className || target.tagName, '失败:', e);
+                }
+              }
+
+              // 再次等待新 URL 出现（最多 15 秒）
+              newUrl = await waitForNewImageUrl(beforeUrls, 15000);
+              if (newUrl) {
+                console.log('[segmentfault] 方法2成功，新图片 URL:', newUrl);
+                const currentContent = editor.getValue();
+                const imgPattern = new RegExp(`!\\[[^\\]]*\\]\\(${newUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g');
+                editor.setValue(currentContent.replace(imgPattern, ''));
+                return newUrl;
+              }
+
+              console.log('[segmentfault] DOM 粘贴/拖拽上传均未检测到新图片');
+              return null;
+            } catch (e) {
+              console.error('[segmentfault] DOM 粘贴上传失败:', e);
+              return null;
+            }
+          };
+
+          // 上传每张图片并替换 URL
+          for (const img of downloadedImages) {
+            console.log('[segmentfault] 处理图片:', img.url, 'base64长度:', img.base64?.length || 0);
+
+            if (!img.url.startsWith('local://')) {
+              console.log('[segmentfault] 跳过非本地图片:', img.url);
+              continue;
+            }
+
+            console.log('[segmentfault] 上传本地图片:', img.url);
+            const newUrl = await uploadImageToSegmentfault(img.base64, img.mimeType);
+
+            if (newUrl) {
+              // 替换 Markdown 中的 local:// URL
+              const escapedUrl = img.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const beforeReplace = processedMarkdown;
+              processedMarkdown = processedMarkdown.replace(
+                new RegExp(escapedUrl, 'g'),
+                newUrl
+              );
+              const replaced = beforeReplace !== processedMarkdown;
+              console.log('[segmentfault] 图片 URL 替换:', replaced ? '成功' : '未找到匹配', img.url, '->', newUrl);
+            } else {
+              console.warn('[segmentfault] 图片上传失败，保留原链接:', img.url);
+            }
+          }
+
+          console.log('[segmentfault] 图片处理完成，Markdown 是否包含 local://:', processedMarkdown.includes('local://'));
+        } else {
+          console.log('[segmentfault] 没有需要上传的本地图片');
+        }
+
         // 1. 填充标题
         console.log('[segmentfault] Step 1: 填充标题');
         const titleInput = await waitFor('input[placeholder*="标题"], .title-input input') as HTMLInputElement;
@@ -264,7 +498,7 @@ export const segmentfaultAdapter: PlatformAdapter = {
 
         // 2. 填充内容 - 思否使用 Markdown 编辑器
         console.log('[segmentfault] Step 2: 填充内容');
-        const markdown = (payload as any).contentMarkdown || '';
+        const markdown = processedMarkdown;
 
         // 尝试 CodeMirror
         const cm = document.querySelector('.CodeMirror') as any;
@@ -289,7 +523,13 @@ export const segmentfaultAdapter: PlatformAdapter = {
 
         return {
           url: window.location.href,
-          __synccasterNote: '内容已填充完成，请手动点击发布按钮完成发布'
+          __synccasterNote: '内容已填充完成，请手动点击发布按钮完成发布',
+          __debug: {
+            hasDownloadedImages: !!(payload as any).__downloadedImages,
+            downloadedImagesCount: (payload as any).__downloadedImages?.length || 0,
+            markdownHasLocalUrl: processedMarkdown.includes('local://'),
+            markdownLength: processedMarkdown.length,
+          }
         };
       } catch (error: any) {
         console.error('[segmentfault] 填充失败:', error);
@@ -299,6 +539,10 @@ export const segmentfaultAdapter: PlatformAdapter = {
             message: error?.message || String(error),
             stack: error?.stack,
           },
+          __debug: {
+            hasDownloadedImages: !!(payload as any).__downloadedImages,
+            downloadedImagesCount: (payload as any).__downloadedImages?.length || 0,
+          }
         } as any;
       }
     },

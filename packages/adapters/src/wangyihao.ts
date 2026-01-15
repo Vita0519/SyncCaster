@@ -60,7 +60,8 @@ export const wangyihaoAdapter: PlatformAdapter = {
 
     // 超链接降级：只保留链接文本（网易号不支持超链接）
     // [text](url) -> text
-    markdown = markdown.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+    // 使用负向后行断言 (?<!!) 排除 Markdown 图片语法 ![alt](url)
+    markdown = markdown.replace(/(?<!!)\[([^\]]+)\]\([^)]+\)/g, '$1');
 
     const contentHtml = renderMarkdownToHtmlForPaste(markdown, { stripMath: true });
     return {
@@ -175,7 +176,36 @@ export const wangyihaoAdapter: PlatformAdapter = {
               table.replaceWith(p);
             });
 
-            // 7) 清理空的 p 标签
+            // 7) 图片处理：
+            // - 若图片已在 background 中下载（__downloadedImages），用占位符替换，后续在编辑器中逐个上传并插入
+            // - data: URL 仍保留提示，避免 Draft.js 因 base64 过大而崩溃
+            body.querySelectorAll('img').forEach((img) => {
+              const src = img.getAttribute('src') || '';
+
+              const hit = downloadedByUrl.get(src);
+              if (hit) {
+                imagePlaceholderCounter += 1;
+                const placeholder = `[[SC_IMG_${imagePlaceholderCounter}]]`;
+                imagePlaceholders.set(placeholder, {
+                  url: src,
+                  base64: hit.base64,
+                  mimeType: hit.mimeType,
+                });
+                img.replaceWith(doc.createTextNode(placeholder));
+                return;
+              }
+
+              if (src.startsWith('local://') || src.startsWith('data:')) {
+                const alt = img.getAttribute('alt') || '';
+                if (alt) {
+                  img.replaceWith(doc.createTextNode(`[图片: ${alt}]`));
+                } else {
+                  img.remove();
+                }
+              }
+            });
+
+            // 8) 清理空的 p 标签
             body.querySelectorAll('p').forEach((p) => {
               if (!(p.textContent || '').trim() && !p.querySelector('img')) {
                 p.remove();
@@ -242,6 +272,17 @@ export const wangyihaoAdapter: PlatformAdapter = {
         const titleText = String((payload as any).title || '').trim();
         const html = String((payload as any).contentHtml || '');
         const markdown = String((payload as any).contentMarkdown || '');
+
+        // 图片数据（base64）由 background 预下载注入（__downloadedImages），
+        // 通过“占位符 → 逐张上传插入”避免把大段 base64 直接粘贴进 Draft.js 导致崩溃。
+        const downloadedImages = (payload as any).__downloadedImages as Array<{ url: string; base64: string; mimeType: string }> | undefined;
+        const downloadedByUrl = new Map<string, { base64: string; mimeType: string }>();
+        for (const img of downloadedImages || []) {
+          if (!img?.url || !img?.base64) continue;
+          downloadedByUrl.set(img.url, { base64: img.base64, mimeType: img.mimeType || 'image/png' });
+        }
+        const imagePlaceholders = new Map<string, { url: string; base64: string; mimeType: string }>();
+        let imagePlaceholderCounter = 0;
 
         console.log('[wangyihao] 开始填充内容，标题:', titleText?.substring(0, 20));
 
@@ -420,6 +461,198 @@ export const wangyihaoAdapter: PlatformAdapter = {
               }
             } catch (e) {
               console.log('[wangyihao] insertText 填充失败:', e);
+            }
+          }
+
+          // 4) 图片：在占位符位置逐张上传并插入
+          if (filled && imagePlaceholders.size > 0) {
+            console.log('[wangyihao] 检测到图片占位符，开始上传替换', { count: imagePlaceholders.size });
+
+            const mimeToExt = (mime: string) => {
+              const m = (mime || '').toLowerCase();
+              if (m.includes('png')) return 'png';
+              if (m.includes('gif')) return 'gif';
+              if (m.includes('webp')) return 'webp';
+              return 'jpg';
+            };
+
+            const collectImageUrls = (root: HTMLElement): string[] => {
+              const urls: string[] = [];
+              root.querySelectorAll('img').forEach((img) => {
+                const src = (img as HTMLImageElement).src || img.getAttribute('src') || '';
+                if (src) urls.push(src);
+              });
+              return urls;
+            };
+
+            const waitForNewImageUrl = async (
+              root: HTMLElement,
+              beforeUrls: Set<string>,
+              timeoutMs = 25000
+            ): Promise<{ url: string | null; isBlob: boolean }> => {
+              const checkOnce = (): { url: string | null; isBlob: boolean } => {
+                const urls = collectImageUrls(root);
+                for (const u of urls) {
+                  if (!beforeUrls.has(u)) return { url: u, isBlob: u.startsWith('blob:') || u.startsWith('data:') };
+                }
+                return { url: null, isBlob: false };
+              };
+
+              const first = checkOnce();
+              if (first.url) return first;
+
+              return await new Promise((resolve) => {
+                let timer: any;
+                const observer = new MutationObserver(() => {
+                  const r = checkOnce();
+                  if (r.url) {
+                    clearTimeout(timer);
+                    observer.disconnect();
+                    resolve(r);
+                  }
+                });
+
+                observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
+                timer = setTimeout(() => {
+                  observer.disconnect();
+                  resolve({ url: null, isBlob: false });
+                }, timeoutMs);
+              });
+            };
+
+            const uploadImageAtCursor = async (base64: string, mimeType: string) => {
+              try {
+                const blobResp = await fetch(base64);
+                const blob = await blobResp.blob();
+                const ext = mimeToExt(blob.type || mimeType || 'image/png');
+                const file = new File([blob], `image_${Date.now()}.${ext}`, { type: blob.type || mimeType || 'image/png' });
+
+                const beforeUrls = new Set(collectImageUrls(editor));
+                const dt = new DataTransfer();
+                dt.items.add(file);
+
+                const rect = editor.getBoundingClientRect();
+                const clientX = rect.left + rect.width / 2;
+                const clientY = rect.top + Math.min(80, rect.height / 2);
+
+                const tryDrop = () => {
+                  try {
+                    const dragOver = new DragEvent('dragover', { bubbles: true, cancelable: true, clientX, clientY } as any);
+                    Object.defineProperty(dragOver, 'dataTransfer', { get: () => dt });
+                    editor.dispatchEvent(dragOver);
+
+                    const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true, clientX, clientY } as any);
+                    Object.defineProperty(dropEvent, 'dataTransfer', { get: () => dt });
+                    editor.dispatchEvent(dropEvent);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                };
+
+                const tryPaste = () => {
+                  try {
+                    const pasteEvent = new ClipboardEvent('paste', { bubbles: true, cancelable: true } as any);
+                    Object.defineProperty(pasteEvent, 'clipboardData', { get: () => dt });
+                    editor.dispatchEvent(pasteEvent);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                };
+
+                editor.focus();
+                await sleep(80);
+
+                // 优先 drop，不行再 paste，最后尝试 input[type=file]
+                tryDrop();
+                let result = await waitForNewImageUrl(editor, beforeUrls, 20000);
+
+                if (!result.url) {
+                  tryPaste();
+                  result = await waitForNewImageUrl(editor, beforeUrls, 20000);
+                }
+
+                if (!result.url) {
+                  const inputs = Array.from(document.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
+                  const imageInput = inputs.find((i) => {
+                    const accept = (i.accept || '').toLowerCase();
+                    return accept.includes('image') || accept === '' || accept === '*/*';
+                  });
+                  if (imageInput) {
+                    try {
+                      (imageInput as any).files = dt.files;
+                      imageInput.dispatchEvent(new Event('change', { bubbles: true }));
+                      imageInput.dispatchEvent(new Event('input', { bubbles: true }));
+                      result = await waitForNewImageUrl(editor, beforeUrls, 25000);
+                    } catch {}
+                  }
+                }
+
+                return result;
+              } catch (e) {
+                console.log('[wangyihao] uploadImageAtCursor 失败:', e);
+                return { url: null, isBlob: false };
+              }
+            };
+
+            const replacePlaceholderWithImage = async (
+              placeholder: string,
+              image: { url: string; base64: string; mimeType: string }
+            ) => {
+              const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null);
+              let node: Text | null;
+              while ((node = walker.nextNode() as Text)) {
+                const text = node.textContent || '';
+                const idx = text.indexOf(placeholder);
+                if (idx === -1) continue;
+
+                editor.focus();
+                await sleep(80);
+
+                const range = document.createRange();
+                range.setStart(node, idx);
+                range.setEnd(node, idx + placeholder.length);
+
+                const sel = window.getSelection();
+                sel?.removeAllRanges();
+                sel?.addRange(range);
+                await sleep(80);
+
+                document.execCommand('delete', false);
+                await sleep(120);
+
+                const result = await uploadImageAtCursor(image.base64, image.mimeType);
+                if (result.url) return true;
+
+                // 失败时恢复占位符，避免内容丢失
+                try {
+                  document.execCommand('insertText', false, placeholder);
+                } catch {}
+                return false;
+              }
+
+              return false;
+            };
+
+            let success = 0;
+            let failed = 0;
+            for (const [placeholder, image] of imagePlaceholders) {
+              console.log('[wangyihao] 处理占位符:', placeholder, image.url);
+              const ok = await replacePlaceholderWithImage(placeholder, image);
+              if (ok) success += 1;
+              else failed += 1;
+              await sleep(500);
+            }
+
+            console.log('[wangyihao] 图片替换完成', { success, failed });
+            if (failed > 0) {
+              const toast = document.createElement('div');
+              toast.style.cssText =
+                'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:#f97316;color:#fff;padding:12px 24px;border-radius:8px;z-index:999999;font-size:14px;box-shadow:0 4px 12px rgba(0,0,0,0.3);';
+              toast.textContent = `网易号图片自动上传部分失败（成功 ${success} / 失败 ${failed}），请检查网络或手动上传替换`;
+              document.body.appendChild(toast);
+              setTimeout(() => toast.remove(), 6500);
             }
           }
 

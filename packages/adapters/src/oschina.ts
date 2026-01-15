@@ -3,17 +3,16 @@ import { renderMarkdownToHtmlForPaste } from '@synccaster/core';
 
 /**
  * 开源中国适配器
- * 
+ *
  * 平台特点：
  * - 入口：https://my.oschina.net/u/{userId}/blog/write（需要登录）
- * - 编辑器：HTML 富文本编辑器（也支持 Markdown 模式）
- * - 支持：HTML 格式
+ * - 编辑器：支持 HTML 富文本编辑器和 Markdown 模式
+ * - 支持：Markdown 格式
  * - 结构：标题 + 正文
- * 
+ *
  * 发布策略：
  * - 使用 DOM 自动化填充内容
- * - 优先使用 HTML 编辑器模式
- * - 图片链接和公式需要转换为 HTML 格式
+ * - 优先使用 Markdown 编辑器模式
  * - 不执行最终发布操作，由用户手动完成
  */
 export const oschinaAdapter: PlatformAdapter = {
@@ -23,9 +22,8 @@ export const oschinaAdapter: PlatformAdapter = {
   icon: 'oschina',
   capabilities: {
     domAutomation: true,
-    // OSChina 的 Markdown 编辑器对格式支持有限：优先走 HTML 编辑器（Markdown 将在 publish-engine 中转换为 HTML）。
-    supportsMarkdown: false,
-    supportsHtml: true,
+    supportsMarkdown: true,
+    supportsHtml: false,
     supportsTags: true,
     supportsCategories: true,
     supportsCover: false,
@@ -610,23 +608,327 @@ export const oschinaAdapter: PlatformAdapter = {
           console.log('[oschina] No Markdown switch button found, may already be in Markdown mode');
           return false;
         };
-        
-        await switchToHtmlEditor();
+
+        // 0.5 处理本地图片上传 - 先检查是否有本地图片需要上传
+        const downloadedImages = (payload as any).__downloadedImages as Array<{ url: string; base64: string; mimeType: string }> | undefined;
+        let processedHtml = String((payload as any).contentHtml || '');
+        let processedMarkdown = String((payload as any).contentMarkdown || '');
+
+        const hasLocalImages = downloadedImages && downloadedImages.length > 0 &&
+          downloadedImages.some(img => img.url.startsWith('local://'));
+
+        console.log('[oschina] 检查本地图片:', {
+          hasDownloadedImages: !!downloadedImages,
+          count: downloadedImages?.length || 0,
+          hasLocalImages,
+        });
+
+        // 辅助函数：提取内容中的图片 URL
+        const extractImageUrls = (text: string): Set<string> => {
+          const urls = new Set<string>();
+          // 匹配 Markdown 图片语法: ![alt](url)
+          const mdImgRegex = /!\[[^\]]*\]\(([^)]+)\)/g;
+          let match;
+          while ((match = mdImgRegex.exec(text)) !== null) {
+            if (match[1]) urls.add(match[1]);
+          }
+          // 匹配 HTML img 标签
+          const htmlImgRegex = /<img[^>]+src=["']([^"']+)["']/gi;
+          while ((match = htmlImgRegex.exec(text)) !== null) {
+            if (match[1]) urls.add(match[1]);
+          }
+          return urls;
+        };
+
+        // 如果有本地图片，先在 HTML 编辑器中上传
+        if (hasLocalImages) {
+          console.log('[oschina] 发现本地图片，先切换到 HTML 编辑器上传');
+
+          // 切换到 HTML 编辑器
+          await switchToHtmlEditor();
+          await sleep(200);
+
+          // 等待 HTML 编辑器出现
+          await waitFor(
+            () => {
+              const docs = getAllDocs();
+              const hasRich = docs.some((d) => d.querySelectorAll('.ql-editor, .ProseMirror, [contenteditable="true"]').length > 0);
+              return hasRich ? ({} as any) : null;
+            },
+            8000
+          ).catch(() => null);
+          await sleep(100);
+
+          // DOM 粘贴上传函数 - 在 HTML 编辑器中执行
+          const tryDomPasteUploadInHtml = async (blob: Blob, mimeType: string): Promise<string | null> => {
+            try {
+              // 添加调试日志
+              console.log('[oschina] 查找编辑器元素...');
+              console.log('[oschina] .ql-editor:', document.querySelectorAll('.ql-editor').length);
+              console.log('[oschina] .ProseMirror:', document.querySelectorAll('.ProseMirror').length);
+              console.log('[oschina] [contenteditable]:', document.querySelectorAll('[contenteditable="true"]').length);
+              console.log('[oschina] iframe:', document.querySelectorAll('iframe').length);
+
+              // 查找 HTML 编辑器元素（优先富文本编辑器）
+              const editors: Element[] = [
+                // Quill 编辑器
+                ...Array.from(document.querySelectorAll('.ql-editor')),
+                // ProseMirror 编辑器
+                ...Array.from(document.querySelectorAll('.ProseMirror')),
+                // 开源中国可能使用的编辑器 class
+                ...Array.from(document.querySelectorAll('.editor-content')),
+                ...Array.from(document.querySelectorAll('.rich-editor')),
+                ...Array.from(document.querySelectorAll('.content-editor')),
+                ...Array.from(document.querySelectorAll('.blog-editor')),
+                ...Array.from(document.querySelectorAll('.write-editor')),
+                ...Array.from(document.querySelectorAll('.article-editor')),
+                ...Array.from(document.querySelectorAll('.edui-body-container')),
+                ...Array.from(document.querySelectorAll('.w-e-text')),
+                ...Array.from(document.querySelectorAll('.note-editable')),
+                // iframe 中的编辑器
+                ...Array.from(document.querySelectorAll('iframe')).flatMap(iframe => {
+                  try {
+                    const iframeDoc = (iframe as HTMLIFrameElement).contentDocument || (iframe as HTMLIFrameElement).contentWindow?.document;
+                    if (iframeDoc) {
+                      const iframeEditors = Array.from(iframeDoc.querySelectorAll('body[contenteditable="true"], [contenteditable="true"]'));
+                      console.log('[oschina] iframe 内编辑器数量:', iframeEditors.length);
+                      return iframeEditors;
+                    }
+                  } catch (e) {
+                    console.log('[oschina] 无法访问 iframe:', e);
+                  }
+                  return [];
+                }),
+                // 通用 contenteditable 元素（面积大于 2000）
+                ...Array.from(document.querySelectorAll('[contenteditable="true"]')).filter(e => getRectArea(e) > 2000),
+              ];
+
+              // 去重
+              const uniqueEditors = [...new Set(editors)];
+              console.log('[oschina] 找到编辑器元素数量:', uniqueEditors.length);
+
+              if (uniqueEditors.length === 0) {
+                console.log('[oschina] 未找到 HTML 编辑器元素');
+                return null;
+              }
+
+              const editor = uniqueEditors[0] as HTMLElement;
+              console.log('[oschina] 使用 HTML 编辑器元素:', editor.className || editor.tagName, 'nodeName:', editor.nodeName);
+
+              // 辅助函数：获取编辑器内容（支持多种编辑器类型）
+              const getEditorContent = (): string => {
+                // Quill 编辑器
+                const qlEditor = document.querySelector('.ql-editor');
+                if (qlEditor) return qlEditor.innerHTML || '';
+                // ProseMirror 编辑器
+                const pm = document.querySelector('.ProseMirror');
+                if (pm) return pm.innerHTML || '';
+                // 其他常见编辑器
+                const editorSelectors = [
+                  '.editor-content', '.rich-editor', '.content-editor',
+                  '.blog-editor', '.write-editor', '.article-editor',
+                  '.edui-body-container', '.w-e-text', '.note-editable'
+                ];
+                for (const sel of editorSelectors) {
+                  const el = document.querySelector(sel);
+                  if (el) return (el as HTMLElement).innerHTML || '';
+                }
+                // iframe 中的编辑器
+                const iframes = document.querySelectorAll('iframe');
+                for (const iframe of iframes) {
+                  try {
+                    const iframeDoc = (iframe as HTMLIFrameElement).contentDocument || (iframe as HTMLIFrameElement).contentWindow?.document;
+                    if (iframeDoc) {
+                      const body = iframeDoc.body;
+                      if (body && body.getAttribute('contenteditable') === 'true') {
+                        return body.innerHTML || '';
+                      }
+                      const ce = iframeDoc.querySelector('[contenteditable="true"]') as HTMLElement;
+                      if (ce) return ce.innerHTML || '';
+                    }
+                  } catch {}
+                }
+                // 通用 contenteditable 元素
+                const ce = document.querySelector('[contenteditable="true"]') as HTMLElement;
+                if (ce && getRectArea(ce) > 2000) return ce.innerHTML || '';
+                return '';
+              };
+
+              // 辅助函数：等待新的图片 URL 出现
+              const waitForNewImageUrl = async (
+                beforeUrls: Set<string>,
+                timeoutMs: number
+              ): Promise<string | null> => {
+                const start = Date.now();
+                while (Date.now() - start < timeoutMs) {
+                  const currentContent = getEditorContent();
+                  const currentUrls = extractImageUrls(currentContent);
+
+                  for (const url of currentUrls) {
+                    if (!url) continue;
+                    if (beforeUrls.has(url)) continue;
+                    if (url.startsWith('data:') || url.startsWith('blob:')) continue;
+                    if (url.startsWith('local://')) continue;
+                    console.log('[oschina] 检测到新图片 URL:', url);
+                    return url;
+                  }
+
+                  await sleep(300);
+                }
+                return null;
+              };
+
+              // 创建 File 对象
+              const ext = mimeType.includes('png') ? 'png' : mimeType.includes('gif') ? 'gif' : 'jpg';
+              const file = new File([blob], `image_${Date.now()}.${ext}`, { type: mimeType });
+
+              // 创建 DataTransfer 对象
+              const dataTransfer = new DataTransfer();
+              dataTransfer.items.add(file);
+
+              // 记录粘贴前的所有图片 URL
+              const beforeContent = getEditorContent();
+              const beforeUrls = extractImageUrls(beforeContent);
+              console.log('[oschina] 粘贴前图片 URL 数量:', beforeUrls.size);
+
+              // 聚焦编辑器
+              editor.focus?.();
+
+              // 使用 Object.defineProperty 设置 clipboardData
+              console.log('[oschina] 尝试在 HTML 编辑器中粘贴上传');
+              const pasteEvent = new ClipboardEvent('paste', { bubbles: true, cancelable: true });
+              Object.defineProperty(pasteEvent, 'clipboardData', {
+                get: () => dataTransfer,
+                configurable: true
+              });
+
+              // 尝试多个可能的目标元素
+              const targets = [
+                editor,
+                document.querySelector('.ql-editor'),
+                document.querySelector('.ProseMirror'),
+                document.activeElement,
+              ].filter(Boolean) as Element[];
+
+              let dispatched = false;
+              for (const target of targets) {
+                try {
+                  dispatched = target.dispatchEvent(pasteEvent);
+                  console.log('[oschina] 粘贴事件触发到', (target as HTMLElement).className || target.tagName, ':', dispatched);
+                  if (dispatched) break;
+                } catch (e) {
+                  console.log('[oschina] 粘贴失败:', e);
+                }
+              }
+
+              // 等待新 URL 出现（最多 3 秒）
+              let newUrl = await waitForNewImageUrl(beforeUrls, 3000);
+              if (newUrl) {
+                console.log('[oschina] HTML 编辑器粘贴上传成功，新图片 URL:', newUrl);
+                return newUrl;
+              }
+
+              // 方法2: 使用 DragEvent
+              console.log('[oschina] 粘贴未检测到新图片，尝试拖拽上传');
+              const dropDataTransfer = new DataTransfer();
+              dropDataTransfer.items.add(file);
+
+              const dragOverEvent = new DragEvent('dragover', { bubbles: true, cancelable: true });
+              Object.defineProperty(dragOverEvent, 'dataTransfer', { get: () => dropDataTransfer });
+
+              const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true });
+              Object.defineProperty(dropEvent, 'dataTransfer', { get: () => dropDataTransfer });
+
+              for (const target of targets) {
+                try {
+                  target.dispatchEvent(dragOverEvent);
+                  dispatched = target.dispatchEvent(dropEvent);
+                  console.log('[oschina] 拖拽事件触发到', (target as HTMLElement).className || target.tagName, ':', dispatched);
+                  if (dispatched) break;
+                } catch (e) {
+                  console.log('[oschina] 拖拽失败:', e);
+                }
+              }
+
+              // 再次等待新 URL 出现（最多 3 秒）
+              newUrl = await waitForNewImageUrl(beforeUrls, 3000);
+              if (newUrl) {
+                console.log('[oschina] HTML 编辑器拖拽上传成功，新图片 URL:', newUrl);
+                return newUrl;
+              }
+
+              console.log('[oschina] HTML 编辑器上传未检测到新图片');
+              return null;
+            } catch (e) {
+              console.error('[oschina] HTML 编辑器上传失败:', e);
+              return null;
+            }
+          };
+
+          // 上传每张图片并替换 URL
+          for (const img of downloadedImages!) {
+            if (!img.url.startsWith('local://')) {
+              console.log('[oschina] 跳过非本地图片:', img.url);
+              continue;
+            }
+
+            console.log('[oschina] 上传本地图片:', img.url);
+
+            try {
+              const response = await fetch(img.base64);
+              const blob = await response.blob();
+              console.log('[oschina] Blob 创建成功, size:', blob.size);
+
+              const newUrl = await tryDomPasteUploadInHtml(blob, img.mimeType);
+
+              if (newUrl) {
+                const escapedUrl = img.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                processedHtml = processedHtml.replace(new RegExp(escapedUrl, 'g'), newUrl);
+                processedMarkdown = processedMarkdown.replace(new RegExp(escapedUrl, 'g'), newUrl);
+                console.log('[oschina] 图片 URL 替换成功:', img.url, '->', newUrl);
+              } else {
+                console.warn('[oschina] 图片上传失败，保留原链接:', img.url);
+              }
+            } catch (e) {
+              console.error('[oschina] 处理图片异常:', e);
+            }
+          }
+
+          // 清除 HTML 编辑器中因粘贴产生的内容
+          console.log('[oschina] 清除 HTML 编辑器内容');
+          try {
+            const qlEditor = document.querySelector('.ql-editor') as HTMLElement;
+            if (qlEditor) qlEditor.innerHTML = '<p><br></p>';
+            const pm = document.querySelector('.ProseMirror') as HTMLElement;
+            if (pm) pm.innerHTML = '';
+            const ce = Array.from(document.querySelectorAll('[contenteditable="true"]'))
+              .filter(e => getRectArea(e) > 2000)[0] as HTMLElement;
+            if (ce && !ce.classList.contains('ql-editor') && !ce.classList.contains('ProseMirror')) {
+              ce.innerHTML = '';
+            }
+          } catch (e) {
+            console.log('[oschina] 清除编辑器内容失败:', e);
+          }
+
+          console.log('[oschina] 图片处理完成，Markdown 是否包含 local://:', processedMarkdown.includes('local://'));
+        }
+
+        // 切换到 Markdown 编辑器
+        console.log('[oschina] 切换到 Markdown 编辑器');
+        await switchToMarkdown();
         // 确保切换完成后再开始填充（Markdown 编辑器通常为 CodeMirror/textarea）
         await waitFor(
           () => {
             const docs = getAllDocs();
-            const hasRich = docs.some((d) => d.querySelectorAll('.ql-editor, .ProseMirror, [contenteditable="true"]').length > 0);
-            if (hasRich) return {} as any;
             const hasCm = docs.some((d) => d.querySelectorAll('.CodeMirror').length > 0);
             if (hasCm) return {} as any;
             const hasTextarea = docs.some((d) => d.querySelectorAll('textarea').length > 0);
             return hasTextarea ? ({} as any) : null;
           },
-          12000
+          8000
         ).catch(() => null);
-        await sleep(120);
-        
+        await sleep(100);
+
         // 1. 填充标题
         console.log('[oschina] Step 1: 填充标题');
         const titleField = await waitFor(() => findTitleField(), 25000);
@@ -652,8 +954,8 @@ export const oschinaAdapter: PlatformAdapter = {
 
         // 2. 填充内容
         console.log('[oschina] Step 2: 填充内容');
-        const contentHtml = String((payload as any).contentHtml || '');
-        const markdown = String((payload as any).contentMarkdown || '');
+        const contentHtml = processedHtml;
+        const markdown = processedMarkdown;
         console.log('[oschina] HTML length:', contentHtml.length, 'Markdown length:', markdown.length);
         
         // 等待编辑器出现
@@ -745,14 +1047,13 @@ export const oschinaAdapter: PlatformAdapter = {
         };
 
         const ok =
+          // 优先使用 Markdown 编辑器（CodeMirror/textarea）
+          tryFillCodeMirror5(markdown) ||
+          tryFillTextarea(markdown) ||
+          // 兜底：Markdown 模式失败时，尝试写入 HTML 编辑器
           tryFillQuillHtml(contentHtml) ||
           (await tryFillRichHtml(contentHtml)) ||
           (await tryFillIframeHtml(contentHtml)) ||
-          tryFillCodeMirror5(contentHtml) ||
-          tryFillTextarea(contentHtml) ||
-          // 兜底：HTML 模式失败时，仍尝试写入 Markdown 编辑器
-          tryFillCodeMirror5(markdown) ||
-          tryFillTextarea(markdown) ||
           (await tryFillContentEditable(markdown));
 
         if (!ok) {

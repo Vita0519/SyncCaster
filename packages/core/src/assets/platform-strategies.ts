@@ -43,46 +43,41 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
 
   /**
    * CSDN
+   *
+   * CSDN 的图片上传 API 已变更，直接 POST 上传不再支持。
+   * 使用 domPasteUpload 模式可以利用用户在页面的登录状态，
+   * 通过模拟粘贴的方式上传图片，更加稳定可靠。
    */
   csdn: {
-    mode: 'binaryUpload',
+    mode: 'domPasteUpload',
     constraints: {
       acceptedMimeTypes: ['image/jpeg', 'image/png', 'image/gif'],
       maxSizeMB: 5,
     },
-    requirePostIdBeforeUpload: false,
-    uploadUrl: 'https://imgservice.csdn.net/direct/v1.0/image/upload',
-    method: 'POST',
-    fileFieldName: 'file',
-    extraFields: {
-      type: 'blog',
+    domPasteConfig: {
+      editorUrl: 'https://editor.csdn.net/md/?not_checkout=1',
+      editorSelector: '.CodeMirror, .CodeMirror textarea, .monaco-editor textarea, .cm-content, textarea, [contenteditable="true"]',
+      timeoutMs: 40000,
     },
-    responseParser: (data) => ({
-      url: data.data?.url || data.url,
-    }),
   },
 
   /**
    * Zhihu
+   *
+   * 知乎专栏的图片上传需要在页面上下文中执行，因为：
+   * 1. 知乎页面 CSP 策略不允许 fetch data: URL
+   * 2. 知乎的图片上传 API 需要特定的认证和 CSRF token
+   * 使用 domPasteUpload 模式可以利用用户在页面的登录状态，
+   * 通过模拟粘贴的方式上传图片，更加稳定可靠。
    */
   zhihu: {
-    mode: 'binaryUpload',
+    mode: 'domPasteUpload',
     constraints: WEBP_CONSTRAINTS,
-    uploadUrl: 'https://www.zhihu.com/api/v4/images',
-    method: 'POST',
-    fileFieldName: 'file',
-    extraFields: {
-      source: 'article',
+    domPasteConfig: {
+      editorUrl: 'https://zhuanlan.zhihu.com/write',
+      editorSelector: '.public-DraftEditor-content[contenteditable="true"], .DraftEditor-editorContainer [contenteditable="true"], [contenteditable="true"]',
+      timeoutMs: 40000,
     },
-    csrfToken: {
-      type: 'cookie',
-      name: '_xsrf',
-      headerName: 'x-xsrftoken',
-    },
-    responseParser: (data) => ({
-      url: data.url || data.original_url,
-      id: data.id,
-    }),
   },
 
   /**
@@ -141,16 +136,19 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
 
   /**
    * 51CTO
+   *
+   * 51CTO 的图片上传 API 需要登录状态和特定认证，
+   * 使用 domPasteUpload 模式可以利用用户在页面的登录状态，
+   * 通过模拟粘贴的方式上传图片，更加稳定可靠。
    */
   '51cto': {
-    mode: 'binaryUpload',
+    mode: 'domPasteUpload',
     constraints: DEFAULT_CONSTRAINTS,
-    uploadUrl: 'https://blog.51cto.com/api/upload/image',
-    method: 'POST',
-    fileFieldName: 'file',
-    responseParser: (data) => ({
-      url: data.data?.url || data.url,
-    }),
+    domPasteConfig: {
+      editorUrl: 'https://blog.51cto.com/blogger/publish?&newBloger=2',
+      editorSelector: '.CodeMirror, .CodeMirror textarea, textarea, [contenteditable="true"]',
+      timeoutMs: 40000,
+    },
   },
 
   /**
@@ -216,16 +214,19 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
 
   /**
    * OSChina
+   *
+   * 开源中国的图片上传 API 需要登录状态和特定认证，
+   * 使用 domPasteUpload 模式可以利用用户在页面的登录状态，
+   * 通过模拟粘贴的方式上传图片，更加稳定可靠。
    */
   oschina: {
-    mode: 'binaryUpload',
+    mode: 'domPasteUpload',
     constraints: DEFAULT_CONSTRAINTS,
-    uploadUrl: 'https://my.oschina.net/action/ajax/upload_img',
-    method: 'POST',
-    fileFieldName: 'upload',
-    responseParser: (data) => ({
-      url: data.url || data.imgUrl,
-    }),
+    domPasteConfig: {
+      editorUrl: 'https://my.oschina.net/blog/write',
+      editorSelector: '.ql-editor, .ProseMirror, [contenteditable="true"], .CodeMirror textarea',
+      timeoutMs: 40000,
+    },
   },
 
   /**
@@ -271,13 +272,15 @@ export const platformImageStrategies: Record<string, ImageUploadStrategy> = {
 
   /**
    * Wangyihao (mp.163.com)
+   * 网易号 Draft.js 编辑器对粘贴事件处理严格，domPasteUpload 模式不可靠
+   * 使用 externalUrlOnly 模式，直接使用外部 URL
    */
   wangyihao: {
     mode: 'domPasteUpload',
     constraints: WEBP_CONSTRAINTS,
     domPasteConfig: {
       editorUrl: 'https://mp.163.com/#/article-publish',
-      editorSelector: '.DraftEditor-root, .public-DraftEditor-content, [role="textbox"][contenteditable="true"]',
+      editorSelector: '.public-DraftEditor-content[contenteditable="true"], [data-contents="true"], [contenteditable="true"]',
       timeoutMs: 45000,
     },
   },

@@ -77,42 +77,184 @@ export const baijiahaoAdapter: PlatformAdapter = {
 
       // 1) 填充标题 - 百家号标题在 contenteditable div 中
       if (titleText) {
-        await sleep(1000); // 等待页面加载
-        
+        await sleep(300); // 等待页面加载（优化：从 1000ms 减少到 300ms）
+
         const titleEditor = await waitFor(() => {
           // 百家号标题输入框在 .client_components_titleInput 内的 contenteditable div
+          // 添加更多选择器以适应不同版本的页面结构
           const candidates = [
             document.querySelector('.client_components_titleInput [contenteditable="true"]'),
             document.querySelector('.client_pages_edit_components_titleInput [contenteditable="true"]'),
             document.querySelector('[class*="titleInput"] [contenteditable="true"]'),
+            document.querySelector('[class*="Title"] [contenteditable="true"]'),
+            document.querySelector('[class*="title-input"] [contenteditable="true"]'),
+            document.querySelector('[class*="title_input"] [contenteditable="true"]'),
+            document.querySelector('[data-testid="title"] [contenteditable="true"]'),
+            document.querySelector('[placeholder*="标题"]'),
+            document.querySelector('[placeholder*="请输入标题"]'),
           ];
           return (candidates.find(el => el) as HTMLElement) || null;
         }, 10000);
 
         if (titleEditor) {
+          console.log('[baijiahao] 找到标题编辑器，开始填充标题');
+
+          // 聚焦编辑器
           titleEditor.focus();
-          // 清空现有内容
-          titleEditor.innerHTML = '';
-          // 使用 document.execCommand 插入文本
-          document.execCommand('insertText', false, titleText);
-          // 如果 execCommand 不生效，使用备用方案
-          if (!titleEditor.textContent) {
-            titleEditor.innerHTML = `<p dir="auto">${titleText}</p>`;
+          await sleep(100);
+
+          // 方法1：使用 selectAll + delete 清空内容（模拟用户操作）
+          document.execCommand('selectAll', false);
+          await sleep(50);
+          document.execCommand('delete', false);
+          await sleep(50);
+
+          // 方法2：如果还有内容，使用 innerHTML 清空
+          if (titleEditor.textContent?.trim()) {
+            titleEditor.innerHTML = '';
+            titleEditor.textContent = '';
+            await sleep(50);
           }
+
+          // 重新聚焦
+          titleEditor.focus();
+          await sleep(50);
+
+          // 插入新标题
+          let inserted = document.execCommand('insertText', false, titleText);
+
+          // 如果 execCommand 不生效，使用备用方案
+          if (!inserted || !titleEditor.textContent?.trim()) {
+            console.log('[baijiahao] execCommand 失败，使用备用方案');
+            // 备用方案1：直接设置 textContent
+            titleEditor.textContent = titleText;
+            titleEditor.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+
+          // 如果还是没有内容，使用 innerHTML
+          if (!titleEditor.textContent?.trim()) {
+            console.log('[baijiahao] textContent 失败，使用 innerHTML');
+            titleEditor.innerHTML = titleText;
+            titleEditor.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+
+          // 触发事件通知框架
           titleEditor.dispatchEvent(new Event('input', { bubbles: true }));
           titleEditor.dispatchEvent(new Event('change', { bubbles: true }));
-          console.log('[baijiahao] 标题填充成功');
+          titleEditor.dispatchEvent(new Event('blur', { bubbles: true }));
+
+          // 验证填充结果
+          const actualTitle = titleEditor.textContent?.trim() || '';
+          if (actualTitle === titleText) {
+            console.log('[baijiahao] 标题填充成功:', titleText.substring(0, 20) + '...');
+          } else {
+            console.warn('[baijiahao] 标题填充可能不完整，期望:', titleText.substring(0, 20), '实际:', actualTitle.substring(0, 20));
+          }
         } else {
           console.log('[baijiahao] 未找到标题输入框');
         }
       }
 
-      // 2) 等待编辑器加载
-      await sleep(2500);
+      // 2) 等待编辑器加载（优化：从 2500ms 减少到 500ms）
+      await sleep(500);
+
+      // 2.5) 处理本地图片上传
+      // 检查是否有需要上传的本地图片
+      const downloadedImages = (payload as any).__downloadedImages as Array<{ url: string; base64: string; mimeType: string }> | undefined;
+      let processedHtml = html;
+
+      if (downloadedImages && downloadedImages.length > 0) {
+        console.log('[baijiahao] 发现', downloadedImages.length, '张本地图片需要上传');
+
+        // 图片上传函数
+        const uploadImageToBaijiahao = async (base64: string, mimeType: string): Promise<string | null> => {
+          try {
+            // 将 base64 转换为 Blob
+            const response = await fetch(base64);
+            const blob = await response.blob();
+
+            // 构建 FormData
+            const formData = new FormData();
+            const ext = mimeType.includes('png') ? 'png' : mimeType.includes('gif') ? 'gif' : 'jpg';
+            const filename = `image_${Date.now()}.${ext}`;
+            formData.append('media', blob, filename);
+
+            // 尝试多个可能的上传 API
+            const uploadUrls = [
+              'https://baijiahao.baidu.com/builderinner/api/content/file/upload',
+              'https://baijiahao.baidu.com/pcui/picture/uploadproxy',
+              'https://baijiahao.baidu.com/builder/api/content/file/upload',
+            ];
+
+            for (const uploadUrl of uploadUrls) {
+              try {
+                const uploadResp = await fetch(uploadUrl, {
+                  method: 'POST',
+                  body: formData,
+                  credentials: 'include',
+                });
+
+                if (!uploadResp.ok) continue;
+
+                const data = await uploadResp.json();
+                console.log('[baijiahao] 上传响应:', data);
+
+                // 尝试从响应中提取图片 URL
+                const imgUrl =
+                  data?.ret?.https_url ||
+                  data?.ret?.url ||
+                  data?.data?.url ||
+                  data?.data?.https_url ||
+                  data?.url ||
+                  data?.https_url ||
+                  data?.ret?.boss_url;
+
+                if (imgUrl) {
+                  console.log('[baijiahao] 图片上传成功:', imgUrl);
+                  return imgUrl.startsWith('//') ? 'https:' + imgUrl : imgUrl;
+                }
+              } catch (e) {
+                console.log('[baijiahao] 上传 API 失败:', uploadUrl, e);
+              }
+            }
+
+            return null;
+          } catch (e) {
+            console.error('[baijiahao] 图片上传失败:', e);
+            return null;
+          }
+        };
+
+        // 上传每张图片并替换 URL
+        for (const img of downloadedImages) {
+          if (!img.url.startsWith('local://')) continue;
+
+          console.log('[baijiahao] 上传图片:', img.url);
+          const newUrl = await uploadImageToBaijiahao(img.base64, img.mimeType);
+
+          if (newUrl) {
+            // 替换 HTML 中的 local:// URL
+            // 匹配 src="local://..." 或 src='local://...'
+            const escapedUrl = img.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            processedHtml = processedHtml.replace(
+              new RegExp(`src=["']${escapedUrl}["']`, 'g'),
+              `src="${newUrl}"`
+            );
+            // 也替换 Markdown 格式的图片链接（如果有）
+            processedHtml = processedHtml.replace(
+              new RegExp(`\\]\\(${escapedUrl}\\)`, 'g'),
+              `](${newUrl})`
+            );
+            console.log('[baijiahao] 图片 URL 替换成功:', img.url, '->', newUrl);
+          } else {
+            console.warn('[baijiahao] 图片上传失败，保留原链接:', img.url);
+          }
+        }
+      }
 
       // 3) 填充正文内容 - 百家号使用 UEditor，内容在 iframe 中
       // 将 markdown 转换为 HTML 段落格式
-      const htmlContent = html || markdown.split('\n\n').map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
+      const htmlContent = processedHtml || markdown.split('\n\n').map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
       
       console.log('[baijiahao] 开始填充正文内容，长度:', htmlContent.length);
 
@@ -294,7 +436,7 @@ export const baijiahaoAdapter: PlatformAdapter = {
         console.log('[baijiahao] 未找到编辑器元素，内容填充失败');
       }
 
-      await sleep(500);
+      await sleep(200); // 优化：从 500ms 减少到 200ms
       return { editUrl: window.location.href, url: window.location.href } as any;
     },
   },

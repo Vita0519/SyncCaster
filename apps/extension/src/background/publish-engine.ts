@@ -269,11 +269,12 @@ export async function publishToTarget(
 
     const needsDownloadedImagesForDomFill =
       adapter.kind === 'dom' &&
-      strategy?.mode === 'domPasteUpload' &&
-      (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu' || target.platform === 'tencent-cloud');
+      ((strategy?.mode === 'domPasteUpload' &&
+        (target.platform === 'aliyun' || target.platform === 'juejin' || target.platform === 'jianshu' || target.platform === 'tencent-cloud' || target.platform === 'baijiahao' || target.platform === '51cto' || target.platform === 'zhihu' || target.platform === 'oschina' || target.platform === 'wangyihao' || target.platform === 'csdn')) ||
+       target.platform === 'segmentfault');
 
     const prefillBeforeImageProcessing =
-      adapter.kind === 'dom' && (target.platform === 'bilibili' || target.platform === 'oschina');
+      adapter.kind === 'dom' && target.platform === 'bilibili';
 
     const imagesToProcess =
       target.platform === 'csdn'
@@ -463,6 +464,11 @@ export async function publishToTarget(
 
         await jobLogger({ level: 'info', step: 'dom', message: '使用站内执行（DOM 自动化）' });
         console.log('[publish-engine] Executing DOM automation', { targetUrl });
+        console.log('[publish-engine] downloadedImages before DOM automation:', {
+          count: downloadedImages.length,
+          urls: downloadedImages.map(img => img.url),
+          base64Lengths: downloadedImages.map(img => img.base64?.length || 0),
+        });
         try {
           // 将下载的图片数据附加到 payload 中，供 fillAndPublish 使用
           const payloadWithImages = {
@@ -943,6 +949,7 @@ async function resolveLocalImageDataForUpload(
   url: string,
   dataUrl?: string
 ): Promise<{ base64: string; mimeType: string } | null> {
+  console.log('[publish-engine] resolveLocalImageDataForUpload', { url, hasDataUrl: !!dataUrl });
   let ref = dataUrl;
 
   // Fallback: try to resolve from db.assets (when post.assets omitted blobUrl to reduce payload size)
@@ -957,13 +964,19 @@ async function resolveLocalImageDataForUpload(
           (typeof anyAsset?.dataUrl === 'string' && anyAsset.dataUrl) ||
           (typeof anyAsset?.url === 'string' && anyAsset.url) ||
           undefined;
-      } catch {
-        // ignore lookup failures
+        if (!ref) {
+          console.warn('[publish-engine] Asset found but no usable data', { id, hasAsset: !!asset });
+        }
+      } catch (e: any) {
+        console.warn('[publish-engine] db.assets lookup failed', { id, error: e?.message });
       }
     }
   }
 
-  if (!ref || typeof ref !== 'string') return null;
+  if (!ref || typeof ref !== 'string') {
+    console.error('[publish-engine] No data found for local:// image', { url });
+    return null;
+  }
 
   // Preferred: Data URL is portable across origins and can be passed into page context safely.
   if (ref.startsWith('data:')) {
@@ -1439,7 +1452,11 @@ async function uploadImagesInPlatform(
 
           urlMapping.set(img.url, newUrl);
           success++;
-        } catch {
+        } catch (e: any) {
+          console.error(`[publish-engine] background 直传失败: ${img.url}`, {
+            error: e?.message || String(e),
+            uploadUrl: strategy.uploadUrl,
+          });
           failed++;
         } finally {
           onProgress?.({ completed: success + failed, total: downloadedImages.length });
@@ -1765,6 +1782,31 @@ async function uploadImagesInPlatform(
           if (!pastedOk && doc.execCommand) {
             await focusEditor(pasteTarget, hostWin);
             pastedOk = doc.execCommand('paste');
+          }
+
+          // 备选方案：使用 input[type=file] 上传图片（更可靠）
+          if (!pastedOk) {
+            console.log('[image-upload] 粘贴/拖拽失败，尝试 input[type=file] 方式');
+            const fileInputs = Array.from(doc.querySelectorAll<HTMLInputElement>('input[type="file"]'));
+            const imageInput = fileInputs.find(input => {
+              const accept = input.accept || '';
+              return accept.includes('image') || accept === '' || accept === '*/*';
+            });
+
+            if (imageInput) {
+              try {
+                const DT = (hostWin as any).DataTransfer || (globalThis as any).DataTransfer;
+                const dt = new DT();
+                dt.items.add(file);
+                (imageInput as any).files = dt.files;
+                imageInput.dispatchEvent(new Event('change', { bubbles: true }));
+                imageInput.dispatchEvent(new Event('input', { bubbles: true }));
+                console.log('[image-upload] input[type=file] 触发成功');
+                pastedOk = true;
+              } catch (e) {
+                console.error('[image-upload] input[type=file] 方式失败', e);
+              }
+            }
           }
 
           if (!pastedOk) {

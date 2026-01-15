@@ -88,7 +88,7 @@ export const zhihuAdapter: PlatformAdapter = {
       
       // 额外等待确保 React/Vue 组件渲染完成
       console.log('[zhihu] Waiting for editor to initialize...');
-      await sleep(2000);
+      await sleep(500);
       
       async function waitForAny(selectors: string[], timeout = 20000): Promise<HTMLElement> {
         const start = Date.now();
@@ -110,6 +110,230 @@ export const zhihuAdapter: PlatformAdapter = {
       }
 
       try {
+        // 0. 处理图片上传（在填充内容之前）
+        // 如果有 __downloadedImages，通过 DOM 粘贴方式上传图片并替换 local:// 链接
+        const downloadedImages = (payload as any).__downloadedImages as Array<{ url: string; base64: string; mimeType: string }> | undefined;
+        let contentMarkdownProcessed = String((payload as any).contentMarkdown || '');
+
+        // 将 base64 转换为 Blob（不使用 fetch，绕过 CSP 限制）
+        const dataUrlToBlob = (dataUrl: string): Blob => {
+          const parts = dataUrl.split(',');
+          if (parts.length !== 2) {
+            throw new Error('Invalid data URL format');
+          }
+          const meta = parts[0];
+          const base64Data = parts[1];
+          const mimeMatch = meta.match(/data:([^;]+)/);
+          const mimeType = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+          const binaryString = atob(base64Data);
+          const bytes = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+          }
+          return new Blob([bytes], { type: mimeType });
+        };
+
+        // 收集编辑器中的所有图片 URL（包括 blob URL）
+        const collectImageUrls = (root: HTMLElement): string[] => {
+          const urls: string[] = [];
+          root.querySelectorAll('img').forEach(img => {
+            if (img.src) {
+              urls.push(img.src);  // 收集所有 URL，不排除 blob
+            }
+          });
+          // 也从 figure 标签中收集
+          root.querySelectorAll('figure').forEach(fig => {
+            const img = fig.querySelector('img');
+            if (img?.src) {
+              urls.push(img.src);
+            }
+          });
+          return urls;
+        };
+
+        // 删除知乎自动添加的图片注释占位符
+        const removeImageCaptions = (root: HTMLElement) => {
+          // 查找包含"添加图片注释"的元素
+          const allElements = root.querySelectorAll('*');
+          allElements.forEach(el => {
+            const text = el.textContent || '';
+            // 检查是否是图片注释占位符
+            if (
+              (text.includes('添加图片注释') || text.includes('不超过 140 字')) &&
+              el.children.length === 0  // 只处理叶子节点
+            ) {
+              console.log('[zhihu] Removing image caption placeholder:', text.substring(0, 50));
+              (el as HTMLElement).textContent = '';
+            }
+          });
+
+          // 也检查 figcaption 和其他常见的图片注释容器
+          const captions = root.querySelectorAll('figcaption, .image-caption, [data-placeholder*="图片注释"]');
+          captions.forEach(caption => {
+            const text = caption.textContent || '';
+            if (text.includes('添加图片注释') || text.includes('可选')) {
+              console.log('[zhihu] Removing figcaption:', text.substring(0, 50));
+              (caption as HTMLElement).textContent = '';
+            }
+          });
+
+          // 检查 contenteditable 的占位符属性
+          const placeholders = root.querySelectorAll('[placeholder*="图片注释"], [placeholder*="可选"]');
+          placeholders.forEach(el => {
+            console.log('[zhihu] Clearing placeholder element');
+            (el as HTMLElement).textContent = '';
+          });
+        };
+
+        // 等待新图片 URL 出现（检测到 blob URL 立即返回，不再等待超时）
+        const waitForNewImageUrl = (
+          root: HTMLElement,
+          beforeUrls: Set<string>,
+          timeoutMs: number
+        ): Promise<{ url: string | null; isBlob: boolean }> => {
+          return new Promise((resolve) => {
+            // 先声明 timer，避免在 checkOnce 中访问未初始化的变量
+            let timer: ReturnType<typeof setTimeout>;
+
+            const checkOnce = (): boolean => {
+              const imgs = root.querySelectorAll('img');
+              for (const img of imgs) {
+                const url = img.src;
+                if (!url || beforeUrls.has(url)) continue;
+
+                if (url.includes('zhimg.com')) {
+                  // 找到最终的 zhimg.com URL
+                  observer.disconnect();
+                  if (timer) clearTimeout(timer);
+                  resolve({ url, isBlob: false });
+                  return true;
+                } else if (url.startsWith('blob:')) {
+                  // 立即返回 blob URL，不再等待（优化用户体验）
+                  observer.disconnect();
+                  if (timer) clearTimeout(timer);
+                  console.log('[zhihu] Found blob URL, returning immediately:', url);
+                  resolve({ url, isBlob: true });
+                  return true;
+                }
+              }
+              return false;
+            };
+
+            const observer = new MutationObserver(() => checkOnce());
+            observer.observe(root, {
+              childList: true,
+              subtree: true,
+              attributes: true,
+              attributeFilter: ['src']
+            });
+
+            if (checkOnce()) return;
+
+            timer = setTimeout(() => {
+              observer.disconnect();
+              console.log('[zhihu] waitForNewImageUrl timeout');
+              resolve({ url: null, isBlob: false });
+            }, timeoutMs);
+          });
+        };
+
+        // 通过 DOM 粘贴方式上传图片
+        const uploadImageViaPaste = async (
+          editor: HTMLElement,
+          base64: string,
+          mimeType: string
+        ): Promise<{ url: string | null; isBlob: boolean }> => {
+          try {
+            // 1. 将 base64 转换为 File 对象
+            const blob = dataUrlToBlob(base64);
+            const ext = mimeType.includes('png') ? 'png' : mimeType.includes('gif') ? 'gif' : 'jpg';
+            const file = new File([blob], `image_${Date.now()}.${ext}`, { type: mimeType });
+
+            // 2. 记录粘贴前的所有图片 URL
+            const beforeUrls = new Set(collectImageUrls(editor));
+            console.log('[zhihu] Before paste, existing URLs:', beforeUrls.size);
+
+            // 3. 创建 DataTransfer 并添加文件
+            const dt = new DataTransfer();
+            dt.items.add(file);
+
+            // 4. 聚焦编辑器
+            editor.focus();
+            await sleep(100);
+
+            // 5. 尝试 drop 事件（更可靠）
+            console.log('[zhihu] Trying drop event...');
+            const dragOver = new DragEvent('dragover', { bubbles: true, cancelable: true });
+            Object.defineProperty(dragOver, 'dataTransfer', { get: () => dt });
+            editor.dispatchEvent(dragOver);
+
+            const dropEvent = new DragEvent('drop', { bubbles: true, cancelable: true });
+            Object.defineProperty(dropEvent, 'dataTransfer', { get: () => dt });
+            editor.dispatchEvent(dropEvent);
+
+            // 6. 如果 drop 失败，尝试 paste 事件
+            await sleep(500);
+            let newUrls = collectImageUrls(editor);
+            let hasNewUrl = newUrls.some(url => !beforeUrls.has(url));
+
+            if (!hasNewUrl) {
+              console.log('[zhihu] Drop failed, trying paste event...');
+              const pasteEvent = new ClipboardEvent('paste', {
+                bubbles: true,
+                cancelable: true,
+                clipboardData: dt
+              });
+              Object.defineProperty(pasteEvent, 'clipboardData', { get: () => dt });
+              editor.dispatchEvent(pasteEvent);
+            }
+
+            // 7. 等待新 URL 出现（知乎上传图片后会生成 zhimg.com 的 URL）
+            console.log('[zhihu] Waiting for new image URL...');
+            const result = await waitForNewImageUrl(editor, beforeUrls, 20000);
+
+            if (result.url) {
+              console.log('[zhihu] Got new image URL:', result.url, 'isBlob:', result.isBlob);
+            } else {
+              console.log('[zhihu] No new image URL found');
+            }
+
+            return result;
+          } catch (e) {
+            console.error('[zhihu] uploadImageViaPaste error:', e);
+            return { url: null, isBlob: false };
+          }
+        };
+
+        // v9 策略：分步填充 - 先用占位符替代图片，填充文本后再在占位符位置插入图片
+        // 保存图片信息：占位符 -> 图片数据
+        const imagePlaceholders = new Map<string, { base64: string; mimeType: string }>();
+
+        if (downloadedImages && downloadedImages.length > 0) {
+          console.log('[zhihu] Step 0: 处理图片 - 使用占位符替代图片链接', { count: downloadedImages.length });
+
+          let imageIndex = 0;
+          for (const img of downloadedImages) {
+            if (img.url.startsWith('local://')) {
+              imageIndex++;
+              const placeholder = `【图片${imageIndex}】`;
+              imagePlaceholders.set(placeholder, { base64: img.base64, mimeType: img.mimeType });
+
+              // 替换 Markdown 中的图片链接为占位符
+              const mdPattern = new RegExp(
+                `!\\[[^\\]]*\\]\\(\\s*${img.url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\)`,
+                'g'
+              );
+              contentMarkdownProcessed = contentMarkdownProcessed.replace(mdPattern, placeholder);
+              console.log('[zhihu] Replaced image with placeholder:', img.url, '->', placeholder);
+            }
+          }
+
+          console.log('[zhihu] Created', imagePlaceholders.size, 'image placeholders');
+        }
+
+        // 更新 payload 中的 contentMarkdown
+        (payload as any).contentMarkdown = contentMarkdownProcessed;
+
         // 1. 填充标题
         console.log('[zhihu] Step 1: 填充标题');
         const titleSelectors = [
@@ -156,7 +380,7 @@ export const zhihuAdapter: PlatformAdapter = {
         titleInput.dispatchEvent(new Event('change', { bubbles: true }));
         
         console.log('[zhihu] Title filled with input simulation:', titleText);
-        await sleep(500);
+        await sleep(200);
 
         // 2. 填充内容 - 知乎支持 Markdown 粘贴解析
         // 优先使用 Markdown 原文，让平台自动识别并弹出解析确认框
@@ -164,14 +388,14 @@ export const zhihuAdapter: PlatformAdapter = {
 
         const contentMarkdown = String((payload as any).contentMarkdown || '');
         const contentHtml = String((payload as any).contentHtml || '');
-        
+
         // 优先使用 Markdown 原文（知乎支持 Markdown 解析）
         const useMarkdown = !!contentMarkdown;
         const contentToFill = useMarkdown ? contentMarkdown : contentHtml;
-        
+
         console.log('[zhihu] Content mode:', useMarkdown ? 'Markdown' : 'HTML');
         console.log('[zhihu] Content length:', contentToFill.length);
-        
+
         const editorSelectors = [
           '.public-DraftEditor-content[contenteditable="true"]',
           '.DraftEditor-editorContainer [contenteditable="true"]',
@@ -181,92 +405,77 @@ export const zhihuAdapter: PlatformAdapter = {
         ];
         const editor = await waitForAny(editorSelectors);
         console.log('[zhihu] Editor found:', editor.tagName, editor.className);
-        
+
+        // 检查编辑器中是否已有内容（图片）
+        const hasExistingContent = editor.innerHTML.trim().length > 0;
+
         // 聚焦编辑器
         editor.focus();
-        await sleep(500);
-        
-        // 触发 paste 事件
-        console.log('[zhihu] Dispatching paste event...');
-        try {
-          editor.focus();
-          await sleep(200);
-          
-          // 触发 keydown 事件
-          const keydownEvent = new KeyboardEvent('keydown', {
-            key: 'v',
-            code: 'KeyV',
-            ctrlKey: true,
-            bubbles: true,
-            cancelable: true,
-          });
-          editor.dispatchEvent(keydownEvent);
-          
-          // 触发 paste 事件
-          const doc = editor.ownerDocument;
-          const win = doc.defaultView || window;
-          const DT = (win as any).DataTransfer || (globalThis as any).DataTransfer;
-          const dt = new DT();
-          
-          if (useMarkdown) {
-            // Markdown 模式：只设置 text/plain，让知乎识别为 Markdown
-            dt.setData('text/plain', contentMarkdown);
-          } else {
-            // HTML 模式：设置 HTML 和纯文本
-            if (contentHtml) dt.setData('text/html', contentHtml);
-            const htmlToPlainText = (html: string) => {
-              try {
-                const div = document.createElement('div');
-                div.innerHTML = html || '';
-                return (div.innerText || div.textContent || '').trim();
-              } catch {
-                return '';
-              }
-            };
-            dt.setData('text/plain', htmlToPlainText(contentHtml));
-          }
+        await sleep(200);
 
-          const CE = (win as any).ClipboardEvent || (globalThis as any).ClipboardEvent;
-          const pasteEvent = new CE('paste', { bubbles: true, cancelable: true } as any);
-          Object.defineProperty(pasteEvent, 'clipboardData', { get: () => dt });
-          editor.dispatchEvent(pasteEvent);
-          
-          console.log('[zhihu] Paste event dispatched');
-        } catch (e) {
-          console.warn('[zhihu] Paste failed:', e);
-          
-          // 备用方案：使用 document.execCommand
+        // 如果编辑器中已有内容（图片），将光标移到末尾
+        if (hasExistingContent) {
+          console.log('[zhihu] 编辑器中已有内容（图片），将光标移到末尾');
           try {
-            editor.focus();
-            if (useMarkdown) {
-              document.execCommand('insertText', false, contentMarkdown);
-            } else if (contentHtml) {
-              const ok = document.execCommand('insertHTML', false, contentHtml);
-              if (!ok) {
-                const htmlToPlainText = (html: string) => {
-                  try {
-                    const div = document.createElement('div');
-                    div.innerHTML = html || '';
-                    return (div.innerText || div.textContent || '').trim();
-                  } catch {
-                    return '';
-                  }
-                };
-                document.execCommand('insertText', false, htmlToPlainText(contentHtml));
-              }
-            }
-          } catch (e2) {
-            console.warn('[zhihu] execCommand also failed:', e2);
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(editor);
+            range.collapse(false);  // false = 折叠到末尾
+            selection?.removeAllRanges();
+            selection?.addRange(range);
+            await sleep(100);
+          } catch (e) {
+            console.warn('[zhihu] 移动光标失败:', e);
           }
         }
-        
+
+        // 使用 DataTransfer + ClipboardEvent 模拟真实粘贴事件
+        // Draft.js 编辑器需要通过 clipboardData 获取粘贴内容
+        console.log('[zhihu] Triggering paste event with DataTransfer...');
+
+        const contentToPaste = useMarkdown ? contentMarkdown : contentHtml;
+
+        try {
+          // 方案1: 使用 ClipboardEvent 构造函数的 clipboardData 参数
+          const dt = new DataTransfer();
+          dt.setData('text/plain', contentToPaste);
+
+          const pasteEvent = new ClipboardEvent('paste', {
+            bubbles: true,
+            cancelable: true,
+            clipboardData: dt
+          });
+
+          editor.dispatchEvent(pasteEvent);
+          console.log('[zhihu] Paste event dispatched with ClipboardEvent constructor');
+        } catch (e) {
+          console.warn('[zhihu] ClipboardEvent constructor failed:', e);
+
+          // 方案2: 使用 Object.defineProperty 设置 clipboardData
+          try {
+            const dt = new DataTransfer();
+            dt.setData('text/plain', contentToPaste);
+
+            const pasteEvent = new Event('paste', { bubbles: true, cancelable: true }) as ClipboardEvent;
+            Object.defineProperty(pasteEvent, 'clipboardData', {
+              get: () => dt,
+              configurable: true
+            });
+
+            editor.dispatchEvent(pasteEvent);
+            console.log('[zhihu] Paste event dispatched with Object.defineProperty');
+          } catch (e2) {
+            console.warn('[zhihu] Object.defineProperty paste also failed:', e2);
+          }
+        }
+
         editor.dispatchEvent(new Event('input', { bubbles: true }));
-        await sleep(1500);
+        await sleep(800);
 
         // 3. 处理 Markdown 解析弹窗（仅格式解析确认，不涉及发布）
         // 当知乎识别到 Markdown 格式时，会弹出"确认并解析"提示
         console.log('[zhihu] Step 3: 处理 Markdown 解析弹窗');
-        await sleep(1000);
+        await sleep(500);
 
         // 查找并点击"确认并解析"按钮（格式解析确认）
         let parseClicked = false;
@@ -315,6 +524,104 @@ export const zhihuAdapter: PlatformAdapter = {
         
         if (!parseClicked) {
           console.log('[zhihu] No Markdown parse dialog found (may not be needed)');
+        }
+
+        // 3.5 在占位符位置插入图片
+        if (imagePlaceholders.size > 0) {
+          console.log('[zhihu] Step 3.5: 在占位符位置插入图片', { count: imagePlaceholders.size });
+
+          // 重新获取编辑器（Markdown 解析后 DOM 可能已更新）
+          const editorForImages = await waitForAny(editorSelectors);
+          await sleep(500);
+
+          // 在编辑器中查找并替换占位符
+          const findAndReplacePlaceholder = async (
+            placeholder: string,
+            imageData: { base64: string; mimeType: string }
+          ): Promise<boolean> => {
+            // 使用 TreeWalker 遍历所有文本节点
+            const walker = document.createTreeWalker(
+              editorForImages,
+              NodeFilter.SHOW_TEXT,
+              null
+            );
+
+            let node: Text | null;
+            while ((node = walker.nextNode() as Text)) {
+              const text = node.textContent || '';
+              const index = text.indexOf(placeholder);
+              if (index !== -1) {
+                console.log('[zhihu] Found placeholder:', placeholder, 'in text:', text.substring(0, 50));
+
+                try {
+                  // 1. 选中占位符
+                  const range = document.createRange();
+                  range.setStart(node, index);
+                  range.setEnd(node, index + placeholder.length);
+
+                  const selection = window.getSelection();
+                  selection?.removeAllRanges();
+                  selection?.addRange(range);
+                  await sleep(100);
+
+                  // 2. 删除占位符
+                  document.execCommand('delete', false);
+                  await sleep(100);
+
+                  // 3. 在该位置粘贴图片
+                  const blob = dataUrlToBlob(imageData.base64);
+                  const ext = imageData.mimeType.includes('png') ? 'png' : imageData.mimeType.includes('gif') ? 'gif' : 'jpg';
+                  const file = new File([blob], `image_${Date.now()}.${ext}`, { type: imageData.mimeType });
+
+                  const dt = new DataTransfer();
+                  dt.items.add(file);
+
+                  // 记录粘贴前的图片 URL
+                  const beforeUrls = new Set(collectImageUrls(editorForImages));
+
+                  // 尝试 paste 事件
+                  const pasteEvent = new ClipboardEvent('paste', {
+                    bubbles: true,
+                    cancelable: true,
+                    clipboardData: dt
+                  });
+                  Object.defineProperty(pasteEvent, 'clipboardData', { get: () => dt });
+                  editorForImages.dispatchEvent(pasteEvent);
+
+                  // 4. 等待图片上传
+                  console.log('[zhihu] Waiting for image upload...');
+                  const result = await waitForNewImageUrl(editorForImages, beforeUrls, 15000);
+
+                  if (result.url) {
+                    console.log('[zhihu] Image uploaded successfully:', result.url);
+                  } else {
+                    console.warn('[zhihu] Image upload may have failed for placeholder:', placeholder);
+                  }
+
+                  // 5. 删除图片注释占位符
+                  await sleep(300);
+                  removeImageCaptions(editorForImages);
+
+                  return true;
+                } catch (e) {
+                  console.error('[zhihu] Error replacing placeholder:', placeholder, e);
+                  return false;
+                }
+              }
+            }
+
+            console.warn('[zhihu] Placeholder not found:', placeholder);
+            return false;
+          };
+
+          // 逐个处理占位符
+          for (const [placeholder, imageData] of imagePlaceholders) {
+            console.log('[zhihu] Processing placeholder:', placeholder);
+            await findAndReplacePlaceholder(placeholder, imageData);
+            await sleep(500);
+          }
+
+          console.log('[zhihu] All image placeholders processed');
         }
 
         // 4. 内容填充完成，不执行发布操作
