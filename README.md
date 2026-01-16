@@ -280,6 +280,33 @@ interface Job {
 ```
 ## 🚀 快速开始
 
+### 方式一：下载预构建包（推荐）
+
+适合普通用户，无需安装任何开发工具。
+
+1. 前往 [Releases 页面](https://github.com/RyanYipeng/SyncCaster/releases) 下载最新版本
+2. 下载 `synccaster-x.x.x.zip` 文件
+3. 解压 ZIP 文件到任意文件夹（如 `D:\SyncCaster`）
+4. 打开 Chrome，访问 `chrome://extensions/`
+5. 开启右上角的 **开发者模式**
+6. 点击 **加载已解压的扩展程序**
+7. 选择刚才解压的文件夹
+
+> **提示**：解压后的文件夹请勿删除，Chrome 需要持续访问该目录。
+
+---
+
+### 方式二：从源码构建
+
+适合开发者或需要自定义修改的用户。
+
+#### 环境要求
+
+- Node.js 18+
+- pnpm 8+
+
+#### 构建步骤
+
 ```bash
 # 克隆仓库
 git clone git@github.com:RyanYipeng/SyncCaster.git

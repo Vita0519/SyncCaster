@@ -28,13 +28,13 @@
       <div class="title-section">
         <div class="title-input-wrapper">
           <input v-model="title" type="text" class="title-input" :class="isDark ? 'dark' : ''" placeholder="请输入文章标题..." />
-          <button @click="copyText(title, '标题')" class="copy-btn" title="复制标题">
-            <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-            </svg>
-          </button>
         </div>
-        <span class="char-count">字数：{{ body.length }}</span>
+        <button @click="copyText(title, '标题')" class="copy-title-btn" :class="isDark ? 'dark' : ''" title="复制标题">
+          <svg xmlns="http://www.w3.org/2000/svg" class="icon" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+          </svg>
+        </button>
+        <span class="char-count" :class="isDark ? 'dark' : ''">字数：{{ body.length }}</span>
       </div>
 
       <!-- 编辑器主体：左右分栏 -->
@@ -1145,16 +1145,20 @@ onUnmounted(() => {
 .source-url { color: #2563eb; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .source-url:hover { text-decoration: underline; }
 
-.title-section { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-shrink: 0; }
-.title-input-wrapper { position: relative; flex: 1; max-width: 600px; }
-.title-input { width: 100%; padding: 8px 36px 8px 12px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 6px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; background: white; }
+.title-section { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-shrink: 0; }
+.title-input-wrapper { flex: 1 1 0; min-width: 200px; max-width: 600px; overflow: hidden; }
+.title-input { width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 12px; font-size: 14px; border: 1px solid #d1d5db; border-radius: 6px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; background: white; }
 .title-input:focus { border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1); }
 .title-input.dark { background: #1f2937; border-color: #4b5563; color: #f3f4f6; }
 .title-input.dark:focus { border-color: #60a5fa; box-shadow: 0 0 0 2px rgba(96, 165, 250, 0.2); }
-.copy-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); padding: 4px; background: transparent; border: none; cursor: pointer; color: #9ca3af; border-radius: 4px; transition: all 0.2s; }
-.copy-btn:hover { background: #f3f4f6; color: #6b7280; }
-.copy-btn .icon { width: 14px; height: 14px; }
-.char-count { font-size: 12px; color: #9ca3af; white-space: nowrap; }
+.copy-title-btn { display: flex; align-items: center; justify-content: center; padding: 6px 10px; background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 6px; cursor: pointer; color: #6b7280; transition: all 0.2s; flex-shrink: 0; }
+.copy-title-btn:hover { background: #e5e7eb; color: #374151; border-color: #d1d5db; }
+.copy-title-btn:active { background: #d1d5db; }
+.copy-title-btn.dark { background: #374151; border-color: #4b5563; color: #9ca3af; }
+.copy-title-btn.dark:hover { background: #4b5563; color: #e5e7eb; border-color: #6b7280; }
+.copy-title-btn .icon { width: 16px; height: 16px; }
+.char-count { font-size: 12px; color: #6b7280; white-space: nowrap; flex-shrink: 0; padding: 4px 8px; background: #f9fafb; border-radius: 4px; }
+.char-count.dark { background: #374151; color: #9ca3af; }
 
 .editor-main { display: flex; gap: 0; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: #f9fafb; flex-shrink: 0; }
 
