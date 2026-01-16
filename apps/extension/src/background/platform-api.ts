@@ -1261,8 +1261,21 @@ const csdnApi: PlatformApiConfig = {
         if (profile?.avatar && !avatar) avatar = profile.avatar;
       }
 
-      logger.info('csdn', '检测到有效的登录 Cookie，判定为已登录', { 
-        userId, 
+      // 如果无法获取到有效的用户标识，说明实际上并未登录
+      // 这可以防止仅凭 session/token 类 Cookie 就误判为已登录
+      if (!userId) {
+        logger.info('csdn', '虽然检测到会话 Cookie，但无法获取用户标识，判定为未登录');
+        return {
+          loggedIn: false,
+          platform: 'csdn',
+          errorType: AuthErrorType.LOGGED_OUT,
+          error: '登录已过期',
+          retryable: false
+        };
+      }
+
+      logger.info('csdn', '检测到有效的登录 Cookie，判定为已登录', {
+        userId,
         nickname,
         hasAvatar: !!avatar,
         source: userIdFromCookie ? 'cookie' : 'html'
@@ -1486,18 +1499,17 @@ const jianshuApi: PlatformApiConfig = {
       names: cookies.map(c => c.name)
     });
 
-    // 简书的关键 Cookie
+    // 简书的关键 Cookie（移除 sensorsData，它是分析追踪 Cookie，未登录用户也会有）
     const rememberToken = cookies.find(c => c.name === 'remember_user_token' && c.value && c.value.length > 10);
     const sessionCore = cookies.find(c => c.name === '_m7e_session_core' && c.value && c.value.length > 10);
-    const sensorsData = cookies.find(c => c.name.includes('sensorsdata') && c.value);
 
-    if (rememberToken || sessionCore || sensorsData) {
-      logger.info('jianshu', '检测到有效的登录 Cookie，判定为已登录');
+    if (rememberToken || sessionCore) {
+      logger.info('jianshu', '检测到有效的登录 Cookie，尝试获取用户信息');
 
       // 尝试用 HTML 探针从设置页提取昵称/slug（不打开标签页）
       try {
         const profile = await tryParseProfileFromHtml();
-        if (profile) {
+        if (profile?.userId) {
           return {
             loggedIn: true,
             platform: 'jianshu',
@@ -1511,12 +1523,15 @@ const jianshuApi: PlatformApiConfig = {
         logger.warn('jianshu', 'HTML 探针失败', { error: e?.message || String(e) });
       }
 
-      // 注意：Cookie 检测无法稳定获取 slug，所以不强行设置 userId
+      // 如果无法获取到有效的用户标识，判定为未登录
+      // 这可以防止仅凭 session Cookie 就误判为已登录
+      logger.info('jianshu', '虽然检测到会话 Cookie，但无法获取用户标识，判定为未登录');
       return {
-        loggedIn: true,
+        loggedIn: false,
         platform: 'jianshu',
-        nickname: '简书用户',
-        detectionMethod: 'cookie',
+        errorType: AuthErrorType.LOGGED_OUT,
+        error: '登录已过期',
+        retryable: false
       };
     }
 
@@ -2366,7 +2381,9 @@ const tencentCloudApi: PlatformApiConfig = {
           const ok = data?.code === 0 || data?.ret === 0 || data?.success === true;
           const payload = data?.data || data?.result || data;
           const user = payload?.user || payload?.data || payload?.info || payload;
-          const userIdRaw = user?.uin || user?.uid || user?.userId || user?.id || user?.UIN;
+          // 优先使用开发者社区特有的用户 ID（creatorId/authorId/developerId）
+          // 避免使用 uin（腾讯通用账号 ID/QQ号），因为它不能用于构建开发者社区用户主页链接
+          const userIdRaw = user?.creatorId || user?.authorId || user?.developerId || user?.uid || user?.userId || user?.id;
           const userId = userIdRaw ? String(userIdRaw).trim() : '';
           const nickname =
             cleanTitleLikeNickname(
@@ -2426,16 +2443,23 @@ const tencentCloudApi: PlatformApiConfig = {
     // 检查 ownerUin（所有者 ID）
     const ownerUinCookie = allCookies.find(c => c.name === 'ownerUin' && c.value && c.value.length > 3);
 
-    const hasValidSession = uinCookie || skeyCookie || qcloudUidCookie || csrfCookie || loginTypeCookie || ownerUinCookie;
+    // 加强检测逻辑：要求更严格的 Cookie 组合
+    // 单独的 uin/p_uin 可能来自其他腾讯服务（QQ、微信等），不能作为开发者社区登录的依据
+    // 必须满足以下条件之一：
+    // 1. uin + skey 组合（完整的腾讯登录会话）
+    // 2. ownerUin（腾讯云账号所有者标识）
+    // 3. qcloud_uid（腾讯云用户 ID）
+    // 注意：qcmainCSRFToken 是公共 CSRF token，即使未登录也存在，不能单独作为登录依据
+    const hasStrongSession =
+      (uinCookie && skeyCookie) ||  // uin + skey 组合
+      ownerUinCookie ||              // 腾讯云账号所有者
+      qcloudUidCookie;               // 腾讯云用户 ID
 
-    if (hasValidSession) {
-      // 尝试从 uin Cookie 获取用户 ID
-      // uin 格式可能是 o123456789，需要去掉前缀 o
-      let userId =
-        uinCookie?.value?.replace(/^o/, '') ||
-        ownerUinCookie?.value?.replace(/^o/, '') ||
-        qcloudUidCookie?.value ||
-        undefined;
+    if (hasStrongSession) {
+      // 注意：不要使用 uin/ownerUin Cookie 作为用户 ID
+      // uin 是腾讯通用账号 ID（QQ号），不能用于构建开发者社区用户主页链接
+      // 开发者社区的用户 ID 需要从 API 或 HTML 页面中获取
+      let userId: string | undefined = undefined;
 
       const tryParseProfileFromHtml = async (): Promise<Pick<UserInfo, 'nickname' | 'avatar' | 'userId'> | null> => {
         const endpoints = [
@@ -2487,8 +2511,12 @@ const tencentCloudApi: PlatformApiConfig = {
               // COSE 备用方案：直接匹配任何 avatar 字段的 https URL
               scope.match(/"avatar"\s*:\s*"(https?:\/\/[^"]+)"/i)?.[1];
 
+            // 优先匹配开发者社区特有的用户 ID（creatorId/authorId/developerId）
+            // 避免使用 uin（腾讯通用账号 ID/QQ号），因为它不能用于构建开发者社区用户主页链接
             const regexUserId =
-              scope.match(/"uin"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
+              scope.match(/"creatorId"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
+              scope.match(/"authorId"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
+              scope.match(/"developerId"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
               scope.match(/"uid"\s*:\s*"?(\d{3,24})"?/i)?.[1] ||
               scope.match(/"userId"\s*:\s*"?(\d{3,24})"?/i)?.[1];
 
@@ -2540,7 +2568,8 @@ const tencentCloudApi: PlatformApiConfig = {
                 obj.head_url ||
                 obj.head;
 
-              const uid = obj.uin || obj.uid || obj.userId || obj.id;
+              // 优先使用开发者社区特有的用户 ID，避免使用 uin（腾讯通用账号 ID）
+              const uid = obj.creatorId || obj.authorId || obj.developerId || obj.uid || obj.userId || obj.id;
 
               return {
                 nickname: cleanTitleLikeNickname(typeof nickname === 'string' ? nickname.trim() : undefined),
@@ -5798,14 +5827,15 @@ const mediumApi: PlatformApiConfig = {
         };
       }
 
-      // 有 Cookie 但无法提取用户名，仍然认为已登录（对齐 cose 项目）
-      logger.info('medium', '已登录但无法提取用户名');
+      // 有 Cookie 但无法提取用户名，判定为未登录
+      // 这可以防止仅凭 session Cookie 就误判为已登录
+      logger.info('medium', '虽然检测到会话 Cookie，但无法提取用户名，判定为未登录');
       return {
-        loggedIn: true,
+        loggedIn: false,
         platform: 'medium',
-        userId: uidCookie?.value,
-        nickname: 'Medium用户',
-        detectionMethod: 'cookie',
+        errorType: AuthErrorType.LOGGED_OUT,
+        error: '登录已过期',
+        retryable: false,
       };
     } catch (e: any) {
       logger.warn('medium', '检测失败', { error: e.message });

@@ -1,0 +1,159 @@
+name: Build and Release Extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v2.0.0)'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Build extension
+        run: pnpm build
+
+      - name: Get version from manifest
+        id: version
+        run: |
+          VERSION=$(node -p "require('./apps/extension/dist/manifest.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create ZIP package
+        run: |
+          cd apps/extension/dist
+          zip -r ../../../synccaster-${{ steps.version.outputs.version }}.zip .
+
+      - name: Create CRX package
+        if: ${{ env.CRX_PRIVATE_KEY != '' }}
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+        run: |
+          # Install crx package
+          npm install -g crx
+
+          # Write private key to file
+          echo "$CRX_PRIVATE_KEY" > extension.pem
+
+          # Create CRX file
+          crx pack apps/extension/dist -o synccaster-${{ steps.version.outputs.version }}.crx -p extension.pem
+
+          # Clean up private key
+          rm -f extension.pem
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: synccaster-zip
+          path: synccaster-${{ steps.version.outputs.version }}.zip
+
+      - name: Upload CRX artifact
+        if: ${{ env.CRX_PRIVATE_KEY != '' }}
+        env:
+          CRX_PRIVATE_KEY: ${{ secrets.CRX_PRIVATE_KEY }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: synccaster-crx
+          path: synccaster-${{ steps.version.outputs.version }}.crx
+          if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download ZIP artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: synccaster-zip
+
+      - name: Download CRX artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: synccaster-crx
+          path: .
+        continue-on-error: true
+
+      - name: Get tag name
+        id: tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Check for CRX file
+        id: check_crx
+        run: |
+          if ls synccaster-*.crx 1> /dev/null 2>&1; then
+            echo "has_crx=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_crx=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: SyncCaster ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: false
+          files: |
+            synccaster-*.zip
+            synccaster-*.crx
+          fail_on_unmatched_files: false
+          body: |
+            ## SyncCaster ${{ steps.tag.outputs.tag }}
+
+            ### Download
+
+            | File | Description |
+            |------|-------------|
+            | `synccaster-*.zip` | Unpacked extension (for developer mode) |
+            | `synccaster-*.crx` | Packed extension (requires developer mode) |
+
+            ### Installation
+
+            **Method 1: Chrome Web Store** (Recommended)
+            - Coming soon...
+
+            **Method 2: Install from ZIP** (Recommended for manual install)
+            1. Download `synccaster-*.zip` from the assets below
+            2. Extract the ZIP file to a folder
+            3. Open Chrome and go to `chrome://extensions/`
+            4. Enable "Developer mode" (toggle in top right)
+            5. Click "Load unpacked" and select the extracted folder
+
+            **Method 3: Install from CRX**
+            1. Download `synccaster-*.crx` from the assets below
+            2. Open Chrome and go to `chrome://extensions/`
+            3. Enable "Developer mode" (toggle in top right)
+            4. Drag and drop the `.crx` file onto the extensions page
+
+            > **Note**: Due to Chrome security policies, CRX files from outside the Chrome Web Store require Developer Mode to be enabled.
+
+            ### Changes
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

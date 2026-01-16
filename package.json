@@ -4,6 +4,7 @@
   "private": true,
   "description": "多平台内容同步助手",
   "scripts": {
+    "postinstall": "cd md && pnpm install",
     "dev": "pnpm --filter @synccaster/extension dev",
     "build": "pnpm --filter @synccaster/extension build",
     "build:all": "pnpm -r build",

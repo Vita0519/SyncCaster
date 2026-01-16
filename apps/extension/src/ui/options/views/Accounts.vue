@@ -197,7 +197,7 @@ const platformUserUrls: Record<string, (userId?: string) => string> = {
   'oschina': (userId) => userId ? `https://my.oschina.net/u/${userId}` : 'https://my.oschina.net/',
   'toutiao': () => 'https://www.toutiao.com/',
   'infoq': (userId) => userId ? `https://www.infoq.cn/u/${userId}/` : 'https://www.infoq.cn/profile/',
-  'baijiahao': (userId) => userId ? `https://author.baidu.com/home/${userId}` : 'https://baijiahao.baidu.com/',
+  'baijiahao': () => 'https://baijiahao.baidu.com/',
   'wangyihao': () => 'https://www.163.com/',
   'medium': (userId) => userId ? `https://medium.com/@${userId}` : 'https://medium.com/me/stories/drafts',
 };
